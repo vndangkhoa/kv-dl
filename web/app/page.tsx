@@ -1,13 +1,27 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { InfoResponse, Stats } from "@/lib/types";
+import type { InfoResponse, PlaylistEntry, PlaylistInfo, Stats, VideoOption } from "@/lib/types";
+import { detectPlaylist } from "@/lib/playlist";
 import Odometer from "@/components/Odometer";
 import DemoTypewriter from "@/components/DemoTypewriter";
 import CookiesPanel from "@/components/CookiesPanel";
 import SelfHostModal from "@/components/SelfHostModal";
+import PlaylistPanel, { type RowStatus } from "@/components/PlaylistPanel";
 
 type Mode = "video" | "audio";
+
+interface Writable2 {
+  write: (c: Uint8Array) => Promise<void>;
+  close: () => Promise<void>;
+  abort: () => Promise<void>;
+}
+interface FileHandle2 {
+  createWritable: () => Promise<Writable2>;
+}
+type DirHandle2 = {
+  getFileHandle: (name: string, opts?: { create?: boolean }) => Promise<FileHandle2>;
+};
 
 interface DlState {
   label: string;
@@ -39,6 +53,10 @@ export default function Home() {
   const [dl, setDl] = useState<DlState | null>(null);
   const dlCtrl = useRef<AbortController | null>(null);
   const [preview, setPreview] = useState(false);
+  const [pl, setPl] = useState<PlaylistInfo | null>(null);
+  const [plStatus, setPlStatus] = useState<Record<string, RowStatus | undefined>>({});
+  const [batchBusy, setBatchBusy] = useState(false);
+  const plCancel = useRef(false);
   const [streamToDisk, setStreamToDisk] = useState(false);
 
   // File System Access API lets us stream the download straight to disk
@@ -82,10 +100,38 @@ export default function Home() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  async function fetchPlaylist(target: string) {
+    setLoading(true);
+    setFetchStart(Date.now());
+    setError("");
+    setInfo(null);
+    try {
+      const res = await fetch("/api/playlist", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: target }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+      setPl(data as PlaylistInfo);
+      setPlStatus({});
+    } catch (err) {
+      setError("Failed to load playlist:\n" + (err as Error).message);
+    } finally {
+      setLoading(false);
+      setFetchStart(null);
+    }
+  }
+
   async function fetchInfo(e?: React.FormEvent, override?: string) {
     e?.preventDefault();
     const target = (override ?? url).trim();
     if (!target) return;
+    // Pure playlist / channel links open the list view automatically.
+    if (detectPlaylist(target)) {
+      await fetchPlaylist(target);
+      return;
+    }
     setLoading(true);
     setFetchStart(Date.now());
     setError("");
@@ -198,6 +244,120 @@ export default function Home() {
       dlCtrl.current = null;
       setDl(null);
     }
+  }
+
+  function pickEntry(e: PlaylistEntry) {
+    setUrl(e.url);
+    setPreview(false);
+    void fetchInfo(undefined, e.url);
+  }
+
+  function loadPlaylistHint() {
+    if (!info?.playlist_id) return;
+    const id = info.playlist_id;
+    // Radio mixes (RD…) only resolve from the watch-page context.
+    const target =
+      id.startsWith("RD") && info.normalized_url
+        ? `${info.normalized_url}${info.normalized_url.includes("?") ? "&" : "?"}list=${id}`
+        : `https://www.youtube.com/playlist?list=${id}`;
+    void fetchPlaylist(target);
+  }
+
+  /** One video of a batch: info → best quality → stream to disk/blob. */
+  async function downloadDirect(target: string, dir: DirHandle2 | null) {
+    const res0 = await fetch("/api/info", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: target }),
+    });
+    const meta = await res0.json();
+    if (!res0.ok) throw new Error(meta.error ?? `HTTP ${res0.status}`);
+    const opts = (meta.video_options ?? []) as VideoOption[];
+    if (!opts.length) throw new Error("no downloadable formats");
+    const best = opts.reduce((a, b) =>
+      Math.abs(a.height - 1080) < Math.abs(b.height - 1080) ? a : b
+    );
+    const safe = String(meta.title ?? "video")
+      .replace(/[\\/:*?"<>|]/g, "_")
+      .slice(0, 120);
+    const fallbackName = `${safe} [${best.label}].mp4`;
+
+    const ctrl = new AbortController();
+    dlCtrl.current = ctrl;
+    const params = new URLSearchParams({ url: target, mode: "video", fid: best.fid });
+    const res = await fetch("/api/download?" + params.toString(), { signal: ctrl.signal });
+    if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
+
+    const cd = res.headers.get("content-disposition") ?? "";
+    const mStar = /filename\*=UTF-8''([^;]+)/i.exec(cd);
+    const mPlain = /filename="([^"]+)"/i.exec(cd);
+    const name = mStar ? decodeURIComponent(mStar[1]) : mPlain ? mPlain[1] : fallbackName;
+
+    if (dir) {
+      const fh = await dir.getFileHandle(name, { create: true });
+      const ws = await fh.createWritable();
+      const reader = res.body.getReader();
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        await ws.write(value);
+      }
+      await ws.close();
+    } else {
+      const chunks: Uint8Array[] = [];
+      const reader = res.body.getReader();
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+      }
+      const blobUrl = URL.createObjectURL(new Blob(chunks as BlobPart[]));
+      const a = document.createElement("a");
+      a.href = blobUrl;
+      a.download = name;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 30000);
+    }
+  }
+
+  async function downloadAll() {
+    if (!pl || dl || batchBusy) return;
+    const items = pl.entries.slice(0, 100);
+    if (!items.length) return;
+    const w = window as unknown as { showDirectoryPicker?: (o?: object) => Promise<DirHandle2> };
+    let dir: DirHandle2 | null = null;
+    if (typeof w.showDirectoryPicker === "function") {
+      try {
+        dir = await w.showDirectoryPicker({ mode: "readwrite" });
+      } catch {
+        return; // folder selection cancelled
+      }
+    }
+    plCancel.current = false;
+    setBatchBusy(true);
+    try {
+      for (const e of items) {
+        if (plCancel.current) break;
+        setPlStatus((s) => ({ ...s, [e.id]: "downloading" }));
+        try {
+          await downloadDirect(e.url, dir);
+          setPlStatus((s) => ({ ...s, [e.id]: "done" }));
+        } catch (err) {
+          setPlStatus((s) => ({ ...s, [e.id]: "failed" }));
+          if ((err as Error).name === "AbortError") break;
+        }
+      }
+    } finally {
+      setBatchBusy(false);
+      dlCtrl.current = null;
+    }
+  }
+
+  function cancelBatch() {
+    plCancel.current = true;
+    dlCtrl.current?.abort();
   }
 
   return (
@@ -418,7 +578,33 @@ export default function Home() {
                 Streams straight to your browser — nothing is saved on the server.
               </p>
             )}
+
+            {info?.playlist_id && !pl && (
+              <button
+                type="button"
+                onClick={loadPlaylistHint}
+                className="mt-3 w-full rounded-lg border border-cyan-300/30 bg-cyan-300/[0.07] px-3 py-2 text-xs font-medium text-cyan-200 transition-colors hover:border-cyan-300/60 hover:bg-cyan-300/[0.14]"
+              >
+                📃 This video is part of a playlist — load the whole list
+              </button>
+            )}
           </div>
+        )}
+
+        {pl && (
+          <PlaylistPanel
+            pl={pl}
+            status={plStatus}
+            activeId={info?.id ?? null}
+            batchBusy={batchBusy}
+            onPick={pickEntry}
+            onDownloadAll={() => void downloadAll()}
+            onCancelBatch={cancelBatch}
+            onClose={() => {
+              setPl(null);
+              setPlStatus({});
+            }}
+          />
         )}
 
         <CookiesPanel />

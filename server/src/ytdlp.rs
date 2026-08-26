@@ -301,3 +301,66 @@ pub fn duration_string(secs: f64) -> String {
         format!("{m}:{s:02}")
     }
 }
+
+/// Fast playlist/channel listing: `--flat-playlist` returns entries without
+/// extracting each video's formats. Capped via `--playlist-items`.
+pub async fn extract_playlist(
+    url: &str,
+    cookies_text: Option<&str>,
+    max_items: usize,
+) -> Result<Value, ExtractError> {
+    let mut cmd = tokio::process::Command::new("yt-dlp");
+    cmd.args([
+        "--flat-playlist",
+        "--dump-single-json",
+        "--no-warnings",
+        "--socket-timeout",
+        "20",
+        "--retries",
+        "2",
+        "--playlist-items",
+        &format!("1:{max_items}"),
+    ]);
+    cmd.args(js_args());
+    if cookies_text.is_some() {
+        cmd.arg("--cookies").arg("/dev/stdin");
+        cmd.stdin(Stdio::piped());
+    } else {
+        cmd.stdin(Stdio::null());
+        if let Ok(path) = std::env::var("COOKIES_FILE") {
+            if std::path::Path::new(&path).exists() {
+                cmd.arg("--cookies").arg(path);
+            }
+        }
+    }
+    cmd.arg(url);
+
+    let mut child = cmd
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| ExtractError::new(format!("failed to spawn yt-dlp: {e}")))?;
+
+    if let Some(text) = cookies_text {
+        let mut stdin = child.stdin.take();
+        if let Some(s) = stdin.as_mut() {
+            let _ = s.write_all(text.as_bytes()).await;
+            let _ = s.shutdown().await;
+        }
+        drop(stdin);
+    }
+
+    let output = child
+        .wait_with_output()
+        .await
+        .map_err(|e| ExtractError::new(format!("yt-dlp failed: {e}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let msg = stderr.lines().filter(|l| l.starts_with("ERROR")).next().unwrap_or("yt-dlp failed");
+        return Err(ExtractError::new(msg.to_string()));
+    }
+    serde_json::from_slice::<Value>(&output.stdout)
+        .map_err(|e| ExtractError::new(format!("Could not parse yt-dlp output: {e}")))
+}

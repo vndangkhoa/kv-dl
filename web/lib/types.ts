@@ -15,6 +15,27 @@ export interface InfoResponse {
   webpage_url?: string | null;
   video_options: VideoOption[];
   audio_bitrates: string[];
+  playlist_id?: string | null;
+}
+
+export interface PlaylistEntry {
+  id: string;
+  index: number;
+  title: string;
+  url: string;
+  uploader?: string | null;
+  duration_string?: string | null;
+  thumbnail?: string | null;
+}
+
+export interface PlaylistInfo {
+  kind: "playlist" | "channel";
+  title: string;
+  url: string;
+  total: number;
+  total_claimed: number;
+  truncated: boolean;
+  entries: PlaylistEntry[];
 }
 
 export interface CookieStatus {

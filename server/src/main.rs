@@ -216,6 +216,113 @@ async fn api_info(
         "webpage_url": video.get("webpage_url"),
         "video_options": ytdlp::build_video_options(formats, duration),
         "audio_bitrates": ytdlp::AUDIO_BITRATES,
+        "playlist_id": normalize::playlist_id(&req.url),
+    }))
+    .into_response()
+}
+
+const PLAYLIST_MAX_ITEMS: usize = 500;
+
+#[derive(Deserialize)]
+struct PlaylistReq {
+    url: String,
+}
+
+/// POST /api/playlist {url} — enumerate a playlist or channel (flat, fast).
+async fn api_playlist(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    body: Option<Json<PlaylistReq>>,
+) -> Response {
+    let Some(Json(req)) = body else {
+        return err_json(StatusCode::BAD_REQUEST, "Missing JSON body with a \"url\" field.");
+    };
+    let raw = req.url.trim();
+    let self_host = self_host(&headers);
+
+    let target = match normalize::classify(raw) {
+        normalize::LinkKind::Playlist => normalize::playlist_url(raw),
+        normalize::LinkKind::Channel => normalize::channel_uploads_url(raw, self_host.as_deref()),
+        normalize::LinkKind::Video => match normalize::playlist_id(raw) {
+            // Radio mixes (RD…) are only extractable from the watch-page
+            // context, so keep the watch?v=…&list=… form as-is.
+            Some(_) => normalize::canonicalize(raw, self_host.as_deref()),
+            None => {
+                return err_json(
+                    StatusCode::BAD_REQUEST,
+                    "That link is a single video, not a playlist or channel.",
+                )
+            }
+        },
+    };
+    let Some(target) = target else {
+        return err_json(StatusCode::BAD_REQUEST, "Could not parse the playlist link.");
+    };
+
+    let cookie_text = current_sid(&headers, &state).and_then(|sid| {
+        state.vault.lock().unwrap().get(&sid).map(|e| e.text)
+    });
+
+    let data = match ytdlp::extract_playlist(&target, cookie_text.as_deref(), PLAYLIST_MAX_ITEMS).await
+    {
+        Ok(v) => v,
+        Err(e) => return err_json(StatusCode::BAD_GATEWAY, e.message),
+    };
+    if data.get("_type").and_then(Value::as_str) != Some("playlist") {
+        return err_json(StatusCode::BAD_GATEWAY, "yt-dlp did not return a playlist.");
+    }
+
+    let empty = vec![];
+    let entries = data.get("entries").and_then(Value::as_array).unwrap_or(&empty);
+    let total_claimed = data
+        .get("playlist_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(entries.len() as u64) as usize;
+
+    let list: Vec<Value> = entries
+        .iter()
+        .enumerate()
+        .filter_map(|(i, e)| {
+            let id = e.get("id").and_then(Value::as_str)?.to_string();
+            let url = e
+                .get("url")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("https://www.youtube.com/watch?v={id}"));
+            let thumb = e
+                .get("thumbnails")
+                .and_then(Value::as_array)
+                .and_then(|a| a.last())
+                .and_then(|t| t.get("url"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .or_else(|| e.get("thumbnail").and_then(Value::as_str).map(str::to_string));
+            Some(json!({
+                "id": id,
+                "index": i + 1,
+                "title": e.get("title").and_then(Value::as_str).unwrap_or("Untitled"),
+                "url": url,
+                "uploader": e.get("uploader").or_else(|| e.get("channel")).and_then(Value::as_str),
+                "duration_string": e.get("duration").and_then(Value::as_f64).map(ytdlp::duration_string),
+                "thumbnail": thumb,
+            }))
+        })
+        .collect();
+
+    let kind = if normalize::classify(raw) == normalize::LinkKind::Channel {
+        "channel"
+    } else {
+        "playlist"
+    };
+
+    Json(json!({
+        "kind": kind,
+        "title": data.get("title").and_then(Value::as_str).unwrap_or("Playlist"),
+        "url": target,
+        "total": list.len(),
+        "total_claimed": total_claimed,
+        "truncated": total_claimed > list.len(),
+        "entries": list,
     }))
     .into_response()
 }
@@ -596,6 +703,7 @@ async fn main() {
     let app = Router::new()
         .route("/api/health", get(health))
         .route("/api/info", post(api_info))
+        .route("/api/playlist", post(api_playlist))
         .route("/api/download", get(api_download))
         .route("/api/stats", get(api_stats))
         .route("/api/cookies/upload", post(api_cookies_upload))

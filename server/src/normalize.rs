@@ -47,6 +47,89 @@ fn unmirror(host: &str, self_host: Option<&str>) -> Option<String> {
     None
 }
 
+/// What kind of YouTube link did the user paste?
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LinkKind {
+    Video,
+    Playlist,
+    Channel,
+}
+
+fn parse_loose(raw: &str) -> Option<Url> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let with_scheme = if raw.contains("://") { raw.to_string() } else { format!("https://{raw}") };
+    Url::parse(&with_scheme).ok()
+}
+
+/// Un-mirror the host, force https, keep path + query as-is.
+pub fn canonicalize(raw: &str, self_host: Option<&str>) -> Option<String> {
+    let mut u = parse_loose(raw)?;
+    let host = u.host_str()?.to_lowercase();
+    let host = unmirror(&host, self_host).unwrap_or(host);
+    u.set_host(Some(&host)).ok()?;
+    let _ = u.set_scheme("https");
+    u.set_fragment(None);
+    u.set_port(None).ok();
+    Some(u.to_string())
+}
+
+pub fn classify(raw: &str) -> LinkKind {
+    let Some(u) = parse_loose(raw) else {
+        return LinkKind::Video;
+    };
+    if !u.host_str().unwrap_or("").to_lowercase().contains("youtube") {
+        return LinkKind::Video;
+    }
+    let path = u.path();
+    if path.starts_with("/playlist") {
+        return LinkKind::Playlist;
+    }
+    if path.starts_with("/@")
+        || path.starts_with("/channel/")
+        || path.starts_with("/c/")
+        || path.starts_with("/user/")
+    {
+        return LinkKind::Channel;
+    }
+    LinkKind::Video
+}
+
+/// Extract the `list=` parameter from any URL form.
+pub fn playlist_id(raw: &str) -> Option<String> {
+    let u = parse_loose(raw)?;
+    for (k, v) in u.query_pairs() {
+        if k == "list" && !v.is_empty() {
+            return Some(v.to_string());
+        }
+    }
+    None
+}
+
+/// Channel URLs need a tab for yt-dlp to enumerate uploads.
+pub fn channel_uploads_url(raw: &str, self_host: Option<&str>) -> Option<String> {
+    let mut url = canonicalize(raw, self_host)?;
+    let u = Url::parse(&url).ok()?;
+    let path = u.path().trim_end_matches('/').to_string();
+    let needs_tab = !path.ends_with("/videos")
+        && !path.ends_with("/streams")
+        && !path.ends_with("/shorts")
+        && !path.ends_with("/playlists")
+        && !path.ends_with("/featured");
+    if needs_tab {
+        url = format!("{url}/videos");
+    }
+    Some(url)
+}
+
+/// Pure playlist link (or watch?list=…) → canonical /playlist?list=… form.
+pub fn playlist_url(raw: &str) -> Option<String> {
+    let id = playlist_id(raw)?;
+    Some(format!("https://www.youtube.com/playlist?list={id}"))
+}
+
 pub fn normalize_url(raw: &str, self_host: Option<&str>) -> Result<String, String> {
     let raw = raw.trim();
     if raw.is_empty() {
@@ -149,5 +232,47 @@ mod tests {
             Some("dl.example.net")
         )
         .is_err());
+    }
+
+    #[test]
+    fn classify_links() {
+        assert_eq!(classify("https://youtube.com/watch?v=a"), LinkKind::Video);
+        assert_eq!(
+            classify("https://www.youtube.com/watch?v=a&list=PL9&t=3"),
+            LinkKind::Video
+        );
+        assert_eq!(classify("https://youtube.com/playlist?list=PL9"), LinkKind::Playlist);
+        assert_eq!(classify("https://youtube.vndns.net/playlist?list=PL9"), LinkKind::Playlist);
+        assert_eq!(classify("https://www.youtube.com/@khoavo"), LinkKind::Channel);
+        assert_eq!(classify("https://youtube.com/channel/UCxyz"), LinkKind::Channel);
+        assert_eq!(classify("https://youtube.vndns.net/@khoavo/videos"), LinkKind::Channel);
+    }
+
+    #[test]
+    fn playlist_helpers() {
+        assert_eq!(
+            playlist_id("https://www.youtube.com/watch?v=a&list=PL99&index=2").as_deref(),
+            Some("PL99")
+        );
+        assert_eq!(
+            playlist_url("https://youtube.vndns.net/watch?v=a&list=PL99").as_deref(),
+            Some("https://www.youtube.com/playlist?list=PL99")
+        );
+    }
+
+    #[test]
+    fn channel_and_canonicalize() {
+        assert_eq!(
+            channel_uploads_url("https://youtube.vndns.net/@khoavo", Some("vndns.net")).as_deref(),
+            Some("https://youtube.com/@khoavo/videos")
+        );
+        assert_eq!(
+            channel_uploads_url("https://youtube.com/@khoavo/videos", None).as_deref(),
+            Some("https://youtube.com/@khoavo/videos")
+        );
+        assert_eq!(
+            canonicalize("https://youtube.vndns.net/playlist?list=PL1", Some("vndns.net")).as_deref(),
+            Some("https://youtube.com/playlist?list=PL1")
+        );
     }
 }

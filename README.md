@@ -26,6 +26,7 @@ Nothing ever touches the server's disk.
 | 💾 **Zero-disk by design** | Downloads are merged on the fly and piped straight into the HTTP response. Cookies live in a RAM-only vault behind HMAC-signed sessions. No temp files, nothing logged, nothing retained. |
 | 🍪 **Cookies without fuss** | Paste them — no file needed. Netscape `cookies.txt`, JSON exports, `Cookie:` header strings and `Set-Cookie` lines are auto-detected and normalized. Age-restricted videos just work. |
 | 🌐 **Any-domain friendly** | The `.com ⇄ your-domain` swap trick adapts itself to whatever domain hosts the instance (derived from `Host` / `X-Forwarded-Host`). Swapped links don't just paste well — **opening one in the browser lands on the app with the video pre-loaded** (`/watch?v=…`, `/shorts/…`, `/embed/…`, `/live/…`), and a leftover `www.` is redirected to the clean form automatically. |
+| 📃 **Playlists & channels** | Paste a playlist or channel link and KV-DL detects it, lists every video (fast flat enumeration, capped at 500) with thumbnails/durations, and offers one-click **Download all** — files stream straight into a folder you pick once. |
 | 🎬 **Preview before you commit** | Click the thumbnail after fetching to play the real video inline (privacy-friendly `youtube-nocookie` embed) — confirm it's the right one before spending bandwidth. |
 | 📊 **Live progress everywhere** | Elapsed-time indicator while YouTube is queried, byte-level progress bar while downloading (with Cancel), and a global download odometer + online-now counter on the page. |
 | 🧯 **Self-healing extraction** | Ships a JS runtime for yt-dlp's modern clients, retries transient failures, falls back across player clients and cookie-less modes when logged-in sessions return broken format lists. |
@@ -148,6 +149,7 @@ pasting and for opening straight in the browser.
 | Endpoint | Method | Purpose |
 |---|---|---|
 | `/api/info` | POST `{url}` | metadata + selectable formats (auto-retries transient failures) |
+| `/api/playlist` | POST `{url}` | playlist/channel enumeration (`--flat-playlist`, capped at 500) — entries with id/title/duration/thumb |
 | `/api/download` | GET `?url=&mode=video\|audio&fid=&abr=` | streamed file (strategy chain, logs chosen path) |
 | `/api/cookies/upload` \| `/status` \| `/clear` | POST/GET | RAM-only vault. Upload: multipart `file` **or** pasted body (`{"text": …}` / raw text); Netscape/JSON/header/Set-Cookie auto-detected |
 | `/api/stats` | GET | `{online, total_downloads}` |

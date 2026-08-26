@@ -70,9 +70,22 @@ export default function Home() {
     return () => clearInterval(id);
   }, [fetchStart]);
 
-  async function fetchInfo(e?: React.FormEvent) {
+  // A shared/swapped link (?url=… or ?v=…) opens the app pre-filled.
+  useEffect(() => {
+    const sp = new URLSearchParams(window.location.search);
+    const v = sp.get("v");
+    const shared = sp.get("url") ?? (v ? `https://www.youtube.com/watch?v=${v}` : null);
+    if (!shared) return;
+    setUrl(shared);
+    window.history.replaceState({}, "", window.location.pathname);
+    void fetchInfo(undefined, shared);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function fetchInfo(e?: React.FormEvent, override?: string) {
     e?.preventDefault();
-    if (!url.trim()) return;
+    const target = (override ?? url).trim();
+    if (!target) return;
     setLoading(true);
     setFetchStart(Date.now());
     setError("");
@@ -81,7 +94,7 @@ export default function Home() {
       const res = await fetch("/api/info", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url }),
+        body: JSON.stringify({ url: target }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);

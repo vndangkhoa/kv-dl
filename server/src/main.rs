@@ -10,10 +10,10 @@ mod normalize;
 mod ytdlp;
 
 use axum::body::to_bytes;
-use axum::extract::{DefaultBodyLimit, FromRequest, Multipart, Query, Request, State};
+use axum::extract::{DefaultBodyLimit, FromRequest, Multipart, Path, Query, Request, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
-use axum::response::{IntoResponse, Response};
+use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use percent_encoding::NON_ALPHANUMERIC;
@@ -499,6 +499,40 @@ async fn api_cookies_clear(State(state): State<SharedState>, headers: HeaderMap)
 }
 
 // ---------------------------------------------------------------------------
+// landing routes: YouTube-style paths open the app pre-filled, so a swapped
+// link like https://youtube.<host>/watch?v=… works right in the browser.
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct LandingQuery {
+    v: Option<String>,
+    t: Option<String>,
+}
+
+fn redirect_to_landing(target: &str) -> Response {
+    let enc = percent_encoding::utf8_percent_encode(target, NON_ALPHANUMERIC);
+    Redirect::to(&format!("/?url={enc}")).into_response()
+}
+
+async fn landing_watch(Query(q): Query<LandingQuery>) -> Response {
+    let Some(v) = q.v.filter(|s| !s.is_empty()) else {
+        return Redirect::to("/").into_response();
+    };
+    let mut target = format!("https://www.youtube.com/watch?v={v}");
+    if let Some(t) = q.t.filter(|s| !s.is_empty()) {
+        target.push_str(&format!("&t={t}"));
+    }
+    redirect_to_landing(&target)
+}
+
+async fn landing_id(Path(id): Path<String>) -> Response {
+    if id.is_empty() {
+        return Redirect::to("/").into_response();
+    }
+    redirect_to_landing(&format!("https://www.youtube.com/watch?v={id}"))
+}
+
+// ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 
@@ -538,6 +572,11 @@ async fn main() {
         .route("/api/cookies/upload", post(api_cookies_upload))
         .route("/api/cookies/status", get(api_cookies_status))
         .route("/api/cookies/clear", post(api_cookies_clear))
+        .route("/watch", get(landing_watch))
+        .route("/shorts/{id}", get(landing_id))
+        .route("/embed/{id}", get(landing_id))
+        .route("/live/{id}", get(landing_id))
+        .route("/v/{id}", get(landing_id))
         .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
         .fallback_service(ServeDir::new(&state.public_dir).append_index_html_on_directories(true))
         .layer(middleware::from_fn(log_requests))

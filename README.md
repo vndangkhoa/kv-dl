@@ -25,7 +25,7 @@ Nothing ever touches the server's disk.
 | ⚡ **Throttle-proof pipeline** | ffmpeg fetching Googlevideo directly gets throttled below 1 MB/s. KV-DL routes each stream through yt-dlp's fast HTTP stack into kernel pipes (`FIFOs`) and lets ffmpeg *only* do the merging — full-speed downloads (~10–20 MB/s typical). |
 | 💾 **Zero-disk by design** | Downloads are merged on the fly and piped straight into the HTTP response. Cookies live in a RAM-only vault behind HMAC-signed sessions. No temp files, nothing logged, nothing retained. |
 | 🍪 **Cookies without fuss** | Paste them — no file needed. Netscape `cookies.txt`, JSON exports, `Cookie:` header strings and `Set-Cookie` lines are auto-detected and normalized. Age-restricted videos just work. |
-| 🌐 **Any-domain friendly** | The `.com ⇄ your-domain` swap trick adapts itself to whatever domain hosts the instance (derived from `Host` / `X-Forwarded-Host`). Every self-hosted copy gets the same magic automatically. |
+| 🌐 **Any-domain friendly** | The `.com ⇄ your-domain` swap trick adapts itself to whatever domain hosts the instance (derived from `Host` / `X-Forwarded-Host`). Swapped links don't just paste well — **opening one in the browser lands on the app with the video pre-loaded** (`/watch?v=…`, `/shorts/…`, `/embed/…`, `/live/…`). |
 | 🎬 **Preview before you commit** | Click the thumbnail after fetching to play the real video inline (privacy-friendly `youtube-nocookie` embed) — confirm it's the right one before spending bandwidth. |
 | 📊 **Live progress everywhere** | Elapsed-time indicator while YouTube is queried, byte-level progress bar while downloading (with Cancel), and a global download odometer + online-now counter on the page. |
 | 🧯 **Self-healing extraction** | Ships a JS runtime for yt-dlp's modern clients, retries transient failures, falls back across player clients and cookie-less modes when logged-in sessions return broken format lists. |
@@ -127,7 +127,8 @@ that folder, done — it pulls the prebuilt image and persists stats under
 4. Set env: `SECRET_KEY`, `SECURE_COOKIES=1`, optional `STATS_FILE`, `COOKIES_FILE`.
 
 Any domain works — the swap suffix derives from the serving host; links shaped
-like `https://youtube.<your-domain>/watch?v=…` work out of the box.
+like `https://youtube.<your-domain>/watch?v=…` work out of the box, both for
+pasting and for opening straight in the browser.
 
 ---
 

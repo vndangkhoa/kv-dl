@@ -1,6 +1,6 @@
 [package]
 name = "kv-dl-server"
-version = "1.1.8"
+version = "1.1.9"
 edition = "2021"
 description = "KV-DL API server - metube-style YouTube downloader backend"
 

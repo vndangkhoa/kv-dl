@@ -61,6 +61,19 @@ docker compose up --build -d     # http://localhost:8080
 Multi-stage image: node builds the UI → rust builds the API → final Alpine
 runtime ships one binary + `web/out` + ffmpeg + yt-dlp.
 
+Prebuilt images (no build needed):
+
+```sh
+docker run -d -p 8080:8080 ghcr.io/vndangkhoa/kv-dl:latest   # also on Docker Hub & git.khoavo.myds.me
+```
+
+## Synology NAS
+
+Use [`docker-compose.synology.yml`](docker-compose.synology.yml) with Container
+Manager (DSM 7.2+): drop it into `/volume1/docker/kv-dl/`, create a Project
+from that folder, done — it pulls the prebuilt image and persists stats under
+`/volume1/docker/kv-dl/data`. Open `http://<NAS-IP>:8080`.
+
 ## Deploy on your own domain
 
 1. `docker compose up --build -d` on your VPS.

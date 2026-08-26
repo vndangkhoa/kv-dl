@@ -1,0 +1,25 @@
+# KV-DL for Synology NAS (DSM 7.2+ Container Manager)
+#
+# Install:
+#   1. File Station: put this file in  /volume1/docker/kv-dl/docker-compose.yml
+#   2. Container Manager → Project → Create → point at that folder
+#      (or SSH:  cd /volume1/docker/kv-dl && sudo docker-compose up -d)
+#   3. Open  http://<NAS-IP>:8080
+#
+# The image is pulled from GHCR — nothing is built on the NAS.
+
+services:
+  kv-dl:
+    image: ghcr.io/vndangkhoa/kv-dl:latest   # or git.khoavo.myds.me/vndangkhoa/kv-dl:latest
+    container_name: kv-dl
+    ports:
+      - "8080:8080"        # host:container — change left side if 8080 is taken
+    restart: unless-stopped
+    environment:
+      # Recommended: set once and keep, so logins survive updates
+      SECRET_KEY: ""       # paste any long random string here
+      # SECURE_COOKIES: "1"            # only when serving via HTTPS reverse proxy
+      STATS_FILE: /data/stats.json     # keep download counter across restarts
+      # COOKIES_FILE: /data/cookies.txt # server-wide fallback cookies.txt (optional)
+    volumes:
+      - /volume1/docker/kv-dl/data:/data   # persistent stats (+optional cookies)

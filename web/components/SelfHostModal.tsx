@@ -350,7 +350,7 @@ export default function SelfHostModal() {
           </summary>
           <ul className="mt-2.5 space-y-2 text-[12.5px] leading-relaxed text-slate-400">
             {TROUBLES.map((t) => (
-              <li key={t.problem} className="grid grid-cols-[150px_1fr] gap-2">
+              <li key={t.problem} className="grid grid-cols-[110px_1fr] gap-2 sm:grid-cols-[150px_1fr]">
                 <span className="font-medium text-slate-300">{t.problem}</span>
                 <span>→ {t.fix}</span>
               </li>

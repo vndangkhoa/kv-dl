@@ -214,7 +214,7 @@ export default function Home() {
       </header>
 
       <section className="mt-7 rounded-2xl border border-white/10 bg-white/[0.045] p-5 shadow-xl backdrop-blur">
-        <form onSubmit={fetchInfo} className="flex gap-2.5">
+        <form onSubmit={fetchInfo} className="flex flex-col gap-2.5 sm:flex-row">
           <input
             type="text"
             value={url}
@@ -227,7 +227,7 @@ export default function Home() {
           <button
             type="submit"
             disabled={loading}
-            className="rounded-xl bg-gradient-to-br from-cyan-300 to-emerald-300 px-6 py-3 font-bold text-[15px] text-teal-950 transition hover:brightness-110 disabled:opacity-55"
+            className="w-full rounded-xl bg-gradient-to-br from-cyan-300 to-emerald-300 px-6 py-3 font-bold text-[15px] text-teal-950 transition hover:brightness-110 disabled:opacity-55 sm:w-auto"
           >
             {loading ? "Fetching…" : "Fetch"}
           </button>
@@ -275,7 +275,7 @@ export default function Home() {
                       src={info.thumbnail}
                       alt=""
                       referrerPolicy="no-referrer"
-                      className="aspect-video w-40 bg-black object-cover"
+                      className="aspect-video w-28 bg-black object-cover sm:w-40"
                     />
                     {info.id && (
                       <span className="absolute inset-0 grid place-items-center bg-black/30 opacity-0 transition-opacity group-hover:opacity-100">
@@ -341,7 +341,7 @@ export default function Home() {
               <select
                 value={abr}
                 onChange={(e) => setAbr(e.target.value)}
-                className="mt-3 rounded-lg border border-white/10 bg-black/35 px-3 py-2 text-sm outline-none focus:border-emerald-300"
+                className="mt-3 w-full rounded-lg border border-white/10 bg-black/35 px-3 py-2 text-sm outline-none focus:border-emerald-300 sm:w-auto"
               >
                 {info.audio_bitrates.map((b) => (
                   <option key={b} value={b}>

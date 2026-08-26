@@ -1,93 +1,147 @@
-# KV-DL — YouTube downloader (Rust + Next.js)
+<div align="center">
 
-A self-hosted, metube-inspired YouTube downloader, fully rewritten:
+# 📥 KV-DL
 
-- **Backend**: Rust (Axum) — URL normalization, yt-dlp orchestration, ffmpeg
-  streaming, HMAC-signed sessions, RAM-only cookie vault, live stats.
-- **Frontend**: Next.js + TypeScript (Tailwind v4) — built as a **static
-  bundle and served by the Rust binary**. One container, one port, no Node
-  runtime in production.
+### Self-hosted YouTube downloader — Rust-fast, disk-free, one container
 
-Paste a normal `youtube.com` link or the domain-swap mirror form
-(`https://youtube.<hosting-domain>/watch?v=…`) — both work; playlist/radio
-params are stripped automatically. Pick a quality (video+audio merged to MP4 by
-ffmpeg) or MP3 (128/192/320 kbps). Files stream through memory straight to the
-browser: **nothing is ever written to the server's disk.**
+**Paste a link · preview it · pick a quality · stream video+audio or MP3 straight to your browser.**
+Nothing ever touches the server's disk.
 
-## Features
+[![GitHub](https://img.shields.io/badge/GitHub-kv--dl-181717?logo=github)](https://github.com/vndangkhoa/kv-dl)
+[![Forgejo](https://img.shields.io/badge/Forgejo-kv--dl-green?logo=git)](https://git.khoavo.myds.me/vndangkhoa/kv-dl)
+[![Docker Hub](https://img.shields.io/docker/pulls/vndangkhoa/kv-dl?logo=docker&label=Docker%20Hub)](https://hub.docker.com/r/vndangkhoa/kv-dl)
+[![GHCR](https://img.shields.io/badge/GHCR-vndangkhoa%2Fkv--dl-2496ED?logo=github)](https://ghcr.io/vndangkhoa/kv-dl)
+
+`Rust · Axum` `Next.js · Tailwind v4` `yt-dlp · ffmpeg` `v1.1.5`
+
+</div>
+
+---
+
+## ✨ Why KV-DL
 
 | | |
-|---|---|
-| Domain-swap trick | `.com` ⇄ `.hosting-domain` accepted everywhere, derived from each instance's own domain, animated demo in UI |
-| Selectable quality | one entry per height up to 2160p, size estimates, h264-preferred for MP4 compat |
-| Audio only | MP3 at 128/192/320 kbps |
-| Streaming | ffmpeg pipes fragmented MP4 / MP3 directly into the HTTP response (with yt-dlp-piped fallback strategy) |
-| Cookies vault | paste or upload cookies in any common format (Netscape `cookies.txt`, JSON export, `Cookie:` header string, `Set-Cookie` lines — auto-detected and normalized) — RAM only, signed HttpOnly session cookie, never on disk/logged/returned, TTL + manual erase |
-| Live stats | global download odometer + online-now counter (`/api/stats`, polled every 20 s), optional `STATS_FILE` persistence |
-| Self-host guide | built-in modal with DNS + Caddy/nginx snippets |
+|:---|:---|
+| ⚡ **Throttle-proof pipeline** | ffmpeg fetching Googlevideo directly gets throttled below 1 MB/s. KV-DL routes each stream through yt-dlp's fast HTTP stack into kernel pipes (`FIFOs`) and lets ffmpeg *only* do the merging — full-speed downloads (~10–20 MB/s typical). |
+| 💾 **Zero-disk by design** | Downloads are merged on the fly and piped straight into the HTTP response. Cookies live in a RAM-only vault behind HMAC-signed sessions. No temp files, nothing logged, nothing retained. |
+| 🍪 **Cookies without fuss** | Paste them — no file needed. Netscape `cookies.txt`, JSON exports, `Cookie:` header strings and `Set-Cookie` lines are auto-detected and normalized. Age-restricted videos just work. |
+| 🌐 **Any-domain friendly** | The `.com ⇄ your-domain` swap trick adapts itself to whatever domain hosts the instance (derived from `Host` / `X-Forwarded-Host`). Every self-hosted copy gets the same magic automatically. |
+| 🎬 **Preview before you commit** | Click the thumbnail after fetching to play the real video inline (privacy-friendly `youtube-nocookie` embed) — confirm it's the right one before spending bandwidth. |
+| 📊 **Live progress everywhere** | Elapsed-time indicator while YouTube is queried, byte-level progress bar while downloading (with Cancel), and a global download odometer + online-now counter on the page. |
+| 🧯 **Self-healing extraction** | Ships a JS runtime for yt-dlp's modern clients, retries transient failures, falls back across player clients and cookie-less modes when logged-in sessions return broken format lists. |
+| 📦 **One container, no Node runtime** | The UI compiles to a static bundle served by the Rust binary. ffmpeg + yt-dlp + node included. Runs on any amd64 host — VPS, NAS, Raspberry Pi-class hardware. |
 
-## Layout
+---
 
+## 🔁 Data flow
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant B as 🖥️ Browser
+    participant A as ⚙️ Rust API (:8080)
+    participant Y as 🐍 yt-dlp
+    participant U as 📺 YouTube
+    participant F as 🎞️ ffmpeg
+
+    rect rgb(20, 30, 45)
+    Note over B,U: ① Fetch — metadata
+    B->>A: POST /api/info {url}
+    A->>A: normalize URL<br/>(any-domain swap, strip playlist params)
+    A->>Y: --dump-single-json (+ cookies from RAM vault)
+    Y->>U: metadata & format queries
+    U-->>Y: title, duration, formats
+    Y-->>A: JSON
+    A-->>B: id · title · thumbnail · qualities (+size est.)
+    end
+
+    rect rgb(18, 38, 32)
+    Note over B,F: ② Download — stream merge
+    B->>A: GET /api/download?url&mode&fid/abr
+    A->>Y: spawn per-stream fetchers
+    par video stream
+        Y->>U: ranged HTTP (full speed)
+        U-->>Y: video bytes
+        Y-->>A: FIFO #1
+    and audio stream
+        Y->>U: ranged HTTP (full speed)
+        U-->>Y: audio bytes
+        Y-->>A: FIFO #2
+    end
+    A->>F: read FIFOs, mux (-c:v copy)
+    F-->>B: fragmented MP4 / MP3, streamed chunks
+    Note over B: live progress bar →<br/>save-to-disk (File System Access API)
+    end
 ```
-server/   Rust crate (axum): src/main.rs, normalize.rs, cookies.rs, ytdlp.rs, download.rs
-web/      Next.js app: app/page.tsx, components/{Odometer,DemoTypewriter,CookiesPanel,SelfHostModal}.tsx
+
+The same one-liner, minus the ceremony:
+
+```text
+yt-dlp ──video──▶ FIFO ─┐
+                        ├──▶ ffmpeg ──▶ fragmented MP4 ──HTTP chunks──▶ 💾 browser
+yt-dlp ──audio──▶ FIFO ─┘     (mux,     no Content-Length needed,
+                          video is copied)   progress tracked client-side
 ```
 
-## Run locally
+If the primary path fails, the API transparently falls back to direct-URL ffmpeg,
+then to a `yt-dlp | ffmpeg` pipe — whichever produces data first wins.
 
-Requirements: Rust toolchain, Node 18+, plus `ffmpeg` and `yt-dlp` on PATH.
+---
+
+## 🚀 Quick start
+
+**Development** (hot-reload UI + API):
 
 ```sh
-# terminal 1 — API (serves web/out if present)
-cd server && PUBLIC_DIR=../web/out cargo run --release
-
-# terminal 2 — hot-reload UI with API proxy
-cd web && npm install && npm run dev      # http://localhost:3000
+cd server && PUBLIC_DIR=../web/out cargo run --release   # terminal 1
+cd web && npm install && npm run dev                     # terminal 2 → http://localhost:3000
 ```
 
-Production-style single origin:
+**Production-style single origin:**
 
 ```sh
-(cd web && npm run build)                 # static export -> web/out
-cd server && PUBLIC_DIR=../web/out cargo run --release   # http://localhost:8080
+(cd web && npm run build)                                # static export -> web/out
+cd server && PUBLIC_DIR=../web/out cargo run --release   # → http://localhost:8080
 ```
 
-## Docker
+## 🐳 Prebuilt images (recommended)
+
+Multi-stage build: Node compiles the UI → Rust builds the API → final Alpine
+runtime ships one binary + static UI + ffmpeg + yt-dlp + node.
 
 ```sh
-docker compose up --build -d     # http://localhost:8080
+docker run -d -p 8080:8080 vndangkhoa/kv-dl:latest                    # Docker Hub
+docker run -d -p 8080:8080 ghcr.io/vndangkhoa/kv-dl:latest            # GHCR
+docker run -d -p 8080:8080 git.khoavo.myds.me/vndangkhoa/kv-dl:latest # Forgejo
 ```
 
-Multi-stage image: node builds the UI → rust builds the API → final Alpine
-runtime ships one binary + `web/out` + ffmpeg + yt-dlp.
-
-Prebuilt images (no build needed):
+Or with Compose:
 
 ```sh
-docker run -d -p 8080:8080 ghcr.io/vndangkhoa/kv-dl:latest   # also on Docker Hub & git.khoavo.myds.me
+docker compose up --build -d      # build from source, http://localhost:8080
 ```
 
-## Synology NAS
+## 🖥️ Synology NAS
 
 Use [`docker-compose.synology.yml`](docker-compose.synology.yml) with Container
-Manager (DSM 7.2+): drop it into `/volume1/docker/kv-dl/`, create a Project
-from that folder, done — it pulls the prebuilt image and persists stats under
-`/volume1/docker/kv-dl/data`. Open `http://<NAS-IP>:8080`.
+Manager (DSM 7.2+): drop it into `/volume1/docker/kv-dl/`, create a Project from
+that folder, done — it pulls the prebuilt image and persists stats under
+`/volume1/docker/kv-dl/data`. Open `http://NAS-IP:8080`.
 
-## Deploy on your own domain
+## 🌍 Deploy on your own domain
 
 1. `docker compose up --build -d` on your VPS.
 2. DNS `A` record → your IP.
 3. HTTPS proxy — Caddy: `dl.example.net { reverse_proxy 127.0.0.1:8080 }`;
    nginx: keep `proxy_buffering off` so downloads stream through.
-4. Set env: `SECRET_KEY`, `SECURE_COOKIES=1`, optional `STATS_FILE`,
-   `COOKIES_FILE`.
+4. Set env: `SECRET_KEY`, `SECURE_COOKIES=1`, optional `STATS_FILE`, `COOKIES_FILE`.
 
-Any domain works — the swap suffix is derived from whatever domain hosts the
-instance (via its `Host` / `X-Forwarded-Host` header); `.vndns.net` is only
-kept as a fallback for links already in circulation.
+Any domain works — the swap suffix derives from the serving host; links shaped
+like `https://youtube.<your-domain>/watch?v=…` work out of the box.
 
-## Configuration
+---
+
+## ⚙️ Configuration
 
 | Variable         | Default | Description                                        |
 |------------------|---------|----------------------------------------------------|
@@ -98,15 +152,33 @@ kept as a fallback for links already in circulation.
 | `STATS_FILE`     | –       | JSON file to persist the download counter          |
 | `COOKIES_FILE`   | –       | Server-wide fallback `cookies.txt` when a user has none |
 
-## API
+## 🔌 API
 
 | Endpoint | Method | Purpose |
 |---|---|---|
-| `/api/info` | POST `{url}` | metadata + selectable formats |
-| `/api/download?url=&mode=video\|audio&fid=&abr=` | GET | streamed file |
-| `/api/cookies/upload` \| `/status` \| `/clear` | POST/GET | RAM-only vault. Upload: multipart `file` **or** pasted body (`{"text": …}` / raw text). Formats auto-detected |
+| `/api/info` | POST `{url}` | metadata + selectable formats (auto-retries transient failures) |
+| `/api/download` | GET `?url=&mode=video\|audio&fid=&abr=` | streamed file (strategy chain, logs chosen path) |
+| `/api/cookies/upload` \| `/status` \| `/clear` | POST/GET | RAM-only vault. Upload: multipart `file` **or** pasted body (`{"text": …}` / raw text); Netscape/JSON/header/Set-Cookie auto-detected |
 | `/api/stats` | GET | `{online, total_downloads}` |
 | `/api/health` | GET | liveness |
 
-> Downloading videos can violate YouTube's ToS and content owners' rights.
-> Use responsibly.
+Every request is line-logged to stdout (`[kv-dl] METHOD path → status (ms)`),
+so `docker logs` always tells you what happened.
+
+## 🧱 Project layout
+
+```
+server/   Rust crate (axum): main.rs · normalize.rs · cookies.rs · ytdlp.rs · download.rs
+web/      Next.js app: app/page.tsx · components/{Odometer,DemoTypewriter,CookiesPanel,SelfHostModal}.tsx
+```
+
+---
+
+> [!WARNING]
+> Downloading videos can violate YouTube's Terms of Service and content
+> owners' rights. Use responsibly — prefer content you own or that is licensed
+> for reuse.
+
+<div align="center">
+<sub>Inspired by metube · Powered by yt-dlp & ffmpeg · Built with Rust + Next.js</sub>
+</div>

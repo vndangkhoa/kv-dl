@@ -78,7 +78,7 @@ export default function DemoTypewriter() {
     <div className="mt-6 flex flex-col items-center gap-2" aria-hidden>
       <div className="text-[11px] uppercase tracking-widest text-slate-400">Just swap the domain</div>
       <div
-        className={`inline-flex max-w-full items-baseline overflow-hidden whitespace-nowrap rounded-full border px-4 py-2.5 font-mono text-sm transition-colors ${
+        className={`inline-flex max-w-full items-baseline overflow-hidden whitespace-nowrap rounded-full border px-3 py-2 font-mono text-[11px] transition-colors sm:px-4 sm:py-2.5 sm:text-sm ${
           done ? "border-emerald-400/60 shadow-[0_0_24px_rgba(52,211,153,0.18)]" : "border-white/10"
         } bg-black/30`}
       >

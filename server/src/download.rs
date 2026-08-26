@@ -56,6 +56,12 @@ async fn start(s: &Strategy) -> Option<Running> {
     }
 }
 
+fn prog_name(s: &Strategy) -> &str {
+    match s {
+        Strategy::Single { prog, .. } => prog,
+    }
+}
+
 /// Try each strategy until one produces data, then stream its stdout to the
 /// client. The download counter fires exactly when streaming starts.
 pub fn stream_response(
@@ -67,12 +73,16 @@ pub fn stream_response(
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(8);
 
     tokio::spawn(async move {
-        for s in &strategies {
+        for (i, s) in strategies.iter().enumerate() {
             let running = start(s).await;
             let mut running = match running {
                 Some(r) => r,
-                None => continue,
+                None => {
+                    eprintln!("[kv-dl] download: strategy #{i} ({}) produced no output", prog_name(s));
+                    continue;
+                }
             };
+            eprintln!("[kv-dl] download: streaming via strategy #{i} ({})", prog_name(s));
             on_start();
             if tx.send(Ok(running.first)).await.is_err() {
                 return; // client gone; children die via drop
@@ -93,6 +103,10 @@ pub fn stream_response(
         let _ = tx
             .send(Err(std::io::Error::other("all download strategies failed")))
             .await;
+        eprintln!(
+            "[kv-dl] download: all {} strategies failed",
+            strategies.len()
+        );
     });
 
     let body = Body::from_stream(ReceiverStream::new(rx));
@@ -141,6 +155,20 @@ fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
+/// Shell snippet: stream one YouTube format into a FIFO via yt-dlp.
+/// yt-dlp's own HTTP stack gets full speed where ffmpeg's HTTPS protocol
+/// gets throttled by Googlevideo; ffmpeg only reads local FIFOs here.
+///
+/// `timeout` bounds orphaned writers; FIFOs are tmpfs — no media touches disk.
+fn fifo_writer(fid_selector: &str, yt_url: &str, fifo: &str) -> String {
+    format!(
+        "timeout -s KILL 7200 yt-dlp --quiet --no-warnings --no-part -f {} -o - {} > {}",
+        sh_quote(fid_selector),
+        sh_quote(yt_url),
+        fifo,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn video_strategies(
     vurl: String,
@@ -151,6 +179,28 @@ pub fn video_strategies(
     fid: String,
 ) -> Vec<Strategy> {
     let audio_mode = if copy_audio(&acodec) { "copy" } else { "aac" };
+    // Audio selector mirrors the codec decision: m4a when we can copy,
+    // anything when we re-encode.
+    let audio_selector =
+        if copy_audio(&acodec) { "bestaudio[ext=m4a]/bestaudio" } else { "bestaudio/best" };
+
+    // ── primary: two yt-dlp writers → tmpfs FIFOs → ffmpeg merge ──────────
+    let fifo_script = format!(
+        "set -e\n\
+         D=/tmp/kvdl.$$\n\
+         mkfifo \"$D.v\" \"$D.a\"\n\
+         cleanup() {{ rm -f \"$D.v\" \"$D.a\"; }}\n\
+         trap cleanup EXIT INT TERM\n\
+         {vw} &\n\
+         {aw} &\n\
+         exec ffmpeg -hide_banner -loglevel error -fflags +nobuffer \
+-i \"$D.v\" -i \"$D.a\" -map 0:v:0 -map 1:a:0? \
+-c:v copy -c:a {audio_mode} -b:a 160k \
+-movflags frag_keyframe+empty_moov+default_base_moof -f mp4 pipe:1",
+        vw = fifo_writer(&fid, &yt_url, "\"$D.v\""),
+        aw = fifo_writer(audio_selector, &yt_url, "\"$D.a\""),
+    );
+
     let primary_args = vec![
         "-hide_banner".into(),
         "-loglevel".into(),
@@ -229,6 +279,7 @@ pub fn video_strategies(
         .collect::<Vec<_>>()
         .join(" ");
     vec![
+        Strategy::Single { prog: "sh".into(), args: vec!["-c".into(), fifo_script] },
         Strategy::Single { prog: "ffmpeg".into(), args: primary_args },
         Strategy::Single {
             prog: "sh".into(),
@@ -237,25 +288,40 @@ pub fn video_strategies(
     ]
 }
 
-pub fn audio_strategy(aurl: String, abr: &str, headers: String) -> Vec<Strategy> {
-    vec![Strategy::Single {
-        prog: "ffmpeg".into(),
-        args: vec![
-            "-hide_banner".into(),
-            "-loglevel".into(),
-            "error".into(),
-            "-headers".into(),
-            headers,
-            "-i".into(),
-            aurl,
-            "-vn".into(),
-            "-c:a".into(),
-            "libmp3lame".into(),
-            "-b:a".into(),
-            format!("{abr}k"),
-            "-f".into(),
-            "mp3".into(),
-            "pipe:1".into(),
-        ],
-    }]
+pub fn audio_strategy(aurl: String, abr: &str, headers: String, yt_url: String) -> Vec<Strategy> {
+    // primary: yt-dlp writer → tmpfs FIFO → ffmpeg MP3 encode
+    let fifo_script = format!(
+        "set -e\n\
+         D=/tmp/kvdl.$$\n\
+         mkfifo \"$D.a\"\n\
+         cleanup() {{ rm -f \"$D.a\"; }}\n\
+         trap cleanup EXIT INT TERM\n\
+         {w} &\n\
+         exec ffmpeg -hide_banner -loglevel error -i \"$D.a\" -vn \
+-c:a libmp3lame -b:a {abr}k -f mp3 pipe:1",
+        w = fifo_writer("bestaudio/best", &yt_url, "\"$D.a\""),
+    );
+    vec![
+        Strategy::Single { prog: "sh".into(), args: vec!["-c".into(), fifo_script] },
+        Strategy::Single {
+            prog: "ffmpeg".into(),
+            args: vec![
+                "-hide_banner".into(),
+                "-loglevel".into(),
+                "error".into(),
+                "-headers".into(),
+                headers,
+                "-i".into(),
+                aurl,
+                "-vn".into(),
+                "-c:a".into(),
+                "libmp3lame".into(),
+                "-b:a".into(),
+                format!("{abr}k"),
+                "-f".into(),
+                "mp3".into(),
+                "pipe:1".into(),
+            ],
+        },
+    ]
 }

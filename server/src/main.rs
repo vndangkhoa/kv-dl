@@ -12,6 +12,7 @@ mod ytdlp;
 use axum::body::to_bytes;
 use axum::extract::{DefaultBodyLimit, FromRequest, Multipart, Query, Request, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -47,6 +48,28 @@ fn now_unix() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+/// One-line request log for `docker logs` / `journalctl`.
+async fn log_requests(req: Request, next: Next) -> Response {
+    let method = req.method().clone();
+    let path = req.uri().path().to_string();
+    let query = req.uri().query().map(|q| q.to_string());
+    let start = Instant::now();
+    let resp = next.run(req).await;
+    // Never print the download URL's signed params in full — keep it short.
+    let target = match query.as_deref() {
+        Some(q) if path == "/api/download" => format!("{path}?{}…", &q[..q.len().min(24)]),
+        _ => path,
+    };
+    println!(
+        "[kv-dl] {} {} -> {} ({} ms)",
+        method,
+        target,
+        resp.status().as_u16(),
+        start.elapsed().as_millis()
+    );
+    resp
 }
 
 fn random_secret() -> Vec<u8> {
@@ -256,7 +279,7 @@ async fn api_download(
             return err_json(StatusCode::BAD_GATEWAY, "Audio stream has no URL.");
         };
         let hdrs = download::http_headers(&[audio], &cookie_hdr);
-        strategies = download::audio_strategy(aurl, &abr, hdrs);
+        strategies = download::audio_strategy(aurl, &abr, hdrs, url.clone());
         mimetype = "audio/mpeg";
         filename = format!("{title} [{abr}kbps].mp3");
     } else {
@@ -517,6 +540,7 @@ async fn main() {
         .route("/api/cookies/clear", post(api_cookies_clear))
         .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
         .fallback_service(ServeDir::new(&state.public_dir).append_index_html_on_directories(true))
+        .layer(middleware::from_fn(log_requests))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port))

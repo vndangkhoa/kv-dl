@@ -11,7 +11,7 @@ mod ytdlp;
 
 use axum::body::to_bytes;
 use axum::extract::{DefaultBodyLimit, FromRequest, Multipart, Path, Query, Request, State};
-use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode, Uri};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
@@ -514,7 +514,33 @@ fn redirect_to_landing(target: &str) -> Response {
     Redirect::to(&format!("/?url={enc}")).into_response()
 }
 
-async fn landing_watch(Query(q): Query<LandingQuery>) -> Response {
+/// Canonicalize `www.`-prefixed mirror hosts so a naive
+/// `www.youtube.com → www.youtube.vndns.net` swap still lands on the clean
+/// `youtube.vndns.net` form. Only fires for hosts with ≥3 labels.
+fn www_redirect(uri: &Uri, headers: &HeaderMap) -> Option<Response> {
+    let raw = headers.get(header::HOST)?.to_str().ok()?;
+    let host = raw.rsplit_once(':').map(|(h, _)| h).unwrap_or(raw);
+    let labels: Vec<&str> = host.split('.').collect();
+    if labels.len() < 3 || !labels[0].eq_ignore_ascii_case("www") {
+        return None;
+    }
+    let clean = labels[1..].join(".");
+    let scheme = headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .unwrap_or("https");
+    let path_query = match uri.query() {
+        Some(q) => format!("{}?{}", uri.path(), q),
+        None => uri.path().to_string(),
+    };
+    Some(Redirect::permanent(&format!("{scheme}://{clean}{path_query}")).into_response())
+}
+
+async fn landing_watch(uri: Uri, headers: HeaderMap, Query(q): Query<LandingQuery>) -> Response {
+    if let Some(r) = www_redirect(&uri, &headers) {
+        return r;
+    }
     let Some(v) = q.v.filter(|s| !s.is_empty()) else {
         return Redirect::to("/").into_response();
     };
@@ -525,7 +551,10 @@ async fn landing_watch(Query(q): Query<LandingQuery>) -> Response {
     redirect_to_landing(&target)
 }
 
-async fn landing_id(Path(id): Path<String>) -> Response {
+async fn landing_id(uri: Uri, headers: HeaderMap, Path(id): Path<String>) -> Response {
+    if let Some(r) = www_redirect(&uri, &headers) {
+        return r;
+    }
     if id.is_empty() {
         return Redirect::to("/").into_response();
     }

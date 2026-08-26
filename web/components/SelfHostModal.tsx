@@ -360,9 +360,10 @@ export default function SelfHostModal() {
             <p className="mt-1.5 text-[12.5px] leading-relaxed text-slate-400">
               Paste a normal <code className="text-cyan-200">youtube.com</code> link and hit Fetch.
               Your copy accepts regular YouTube links — any domain-swap trick you&apos;ve seen
-              elsewhere is just that instance&apos;s convention, not a requirement. And links shaped
-              like <code className="text-cyan-200">https://youtube.&lt;your-domain&gt;/watch?v=…</code>{" "}
-              work here too, automatically.
+              elsewhere is just that instance&apos;s convention, not a requirement. Links shaped like{" "}
+              <code className="text-cyan-200">https://youtube.&lt;your-domain&gt;/watch?v=…</code>{" "}
+              work here too, automatically — and a leftover{" "}
+              <code className="text-cyan-200">www.</code> in front is redirected away.
             </p>
           </div>
 

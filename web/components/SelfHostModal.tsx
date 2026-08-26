@@ -173,7 +173,7 @@ export default function SelfHostModal() {
       <dialog
         ref={dlg}
         onClick={(e) => e.target === dlg.current && dlg.current.close()}
-        className="dlg-pop fixed inset-0 m-auto flex max-h-[92dvh] w-[min(720px,calc(100vw-24px))] max-w-none flex-col overflow-hidden rounded-2xl border border-white/10 bg-[#0d1320] text-left text-slate-200 shadow-2xl shadow-black/60 backdrop:bg-black/70 backdrop:backdrop-blur-sm"
+        className="dlg-pop m-auto flex max-h-[92dvh] w-[min(720px,calc(100vw-24px))] max-w-none flex-col overflow-hidden rounded-2xl border border-white/10 bg-[#0d1320] text-left text-slate-200 shadow-2xl shadow-black/60 backdrop:bg-black/70 backdrop:backdrop-blur-sm [&:not([open])]:hidden"
       >
         {/* ── sticky header ──────────────────────────────────── */}
         <div className="relative shrink-0 border-b border-white/[0.07] px-5 pb-4 pt-5 sm:px-6">

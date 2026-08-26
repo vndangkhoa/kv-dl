@@ -76,6 +76,17 @@ dialog::backdrop {
   backdrop-filter: blur(3px);
 }
 
+/* ---- hide scrollbars (scrolling still works everywhere) ---- */
+* {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+*::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
 /* ---- self-host dialog ---- */
 @keyframes dlg-pop {
   from { opacity: 0; transform: translateY(14px) scale(0.97); }

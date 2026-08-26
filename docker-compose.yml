@@ -1,0 +1,14 @@
+services:
+  kv-dl:
+    build: .
+    container_name: kv-dl
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+    environment: {}
+      # SECRET_KEY: change-me-to-a-long-random-string
+      # SECURE_COOKIES: "1"            # when serving via HTTPS reverse proxy
+      # STATS_FILE: /data/stats.json   # keep download counter across restarts
+      # COOKIES_FILE: /data/cookies.txt
+    # volumes:
+    #   - ./data:/data

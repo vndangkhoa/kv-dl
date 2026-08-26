@@ -1,0 +1,8 @@
+node_modules/
+web/.next/
+web/out/
+server/target/
+*.log
+.DS_Store
+.env
+web/*.tsbuildinfo

@@ -1,0 +1,65 @@
+@import "tailwindcss";
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  background:
+    radial-gradient(1000px 500px at 15% -10%, rgba(34, 211, 238, 0.13), transparent 60%),
+    radial-gradient(900px 520px at 90% 0%, rgba(52, 211, 153, 0.1), transparent 55%),
+    #0b0f17;
+  color: #e8edf5;
+}
+
+/* ---- odometer digits ---- */
+.od-col {
+  height: 1em;
+  overflow: hidden;
+}
+.od-strip {
+  display: flex;
+  flex-direction: column;
+  transition: transform 0.9s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.od-strip > span {
+  height: 1em;
+  line-height: 1;
+  text-align: center;
+}
+@keyframes card-bump {
+  30% { transform: scale(1.07); }
+}
+.stat-bump { animation: card-bump 0.55s ease; }
+
+/* ---- domain-swap demo ---- */
+@keyframes caret-blink { 50% { opacity: 0; } }
+.caret {
+  display: inline-block;
+  width: 8px;
+  height: 1em;
+  margin-left: 2px;
+  border-radius: 2px;
+  background: #22d3ee;
+  animation: caret-blink 1s steps(1) infinite;
+}
+@keyframes arrow-bounce { 50% { transform: translateY(3px); } }
+.arrow-bounce { animation: arrow-bounce 1s ease-in-out infinite; }
+
+/* ---- live dot ---- */
+@keyframes live-pulse {
+  0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.5); }
+  70% { box-shadow: 0 0 0 7px rgba(239, 68, 68, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+}
+.live-dot { animation: live-pulse 1.6s ease-in-out infinite; }
+
+dialog::backdrop {
+  background: rgba(4, 8, 14, 0.72);
+  backdrop-filter: blur(3px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .od-strip, .caret, .arrow-bounce, .live-dot, .stat-bump { animation: none !important; transition: none !important; }
+}

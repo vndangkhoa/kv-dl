@@ -161,8 +161,9 @@ fn sh_quote(s: &str) -> String {
 ///
 /// `timeout` bounds orphaned writers; FIFOs are tmpfs — no media touches disk.
 fn fifo_writer(fid_selector: &str, yt_url: &str, fifo: &str) -> String {
+    let js = crate::ytdlp::js_args().join(" ");
     format!(
-        "timeout -s KILL 7200 yt-dlp --quiet --no-warnings --no-part -f {} -o - {} > {}",
+        "timeout -s KILL 7200 yt-dlp --quiet --no-warnings {js} -f {} -o - {} > {}",
         sh_quote(fid_selector),
         sh_quote(yt_url),
         fifo,
@@ -258,10 +259,12 @@ pub fn video_strategies(
         "pipe:1".into(),
     ];
     // Fallback: video bytes flow through yt-dlp's stdout into ffmpeg's stdin.
+    let js = crate::ytdlp::js_args().join(" ");
     let ytdlp_cmd = [
         "yt-dlp",
         "--quiet",
         "--no-warnings",
+        &js,
         "--no-part",
         "-f",
         &format!("{fid}+bestaudio/{fid}/best"),
@@ -270,6 +273,7 @@ pub fn video_strategies(
         &yt_url,
     ]
     .iter()
+    .filter(|s| !s.is_empty())
     .map(|s| sh_quote(s))
     .collect::<Vec<_>>()
     .join(" ");

@@ -526,8 +526,7 @@ async fn main() {
         secure_cookies: std::env::var("SECURE_COOKIES").as_deref() == Ok("1"),
         public_dir: std::env::var("PUBLIC_DIR").unwrap_or_else(|_| "public".to_string()),
         vault: Mutex::new(cookies::Vault::new()),
-        seen: Mutex::new(HashMap::new()),
-        downloads: AtomicU64::new(initial_downloads),
+        seen: Mutex::new(HashMap::new()),        downloads: AtomicU64::new(initial_downloads),
     });
 
     let app = Router::new()
@@ -542,6 +541,8 @@ async fn main() {
         .fallback_service(ServeDir::new(&state.public_dir).append_index_html_on_directories(true))
         .layer(middleware::from_fn(log_requests))
         .with_state(state);
+
+    ytdlp::init_js_runtime().await;
 
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port))
         .await

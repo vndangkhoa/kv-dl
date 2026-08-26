@@ -15,7 +15,10 @@ RUN cargo build --release
 
 # ---------- 3 · runtime (ffmpeg + yt-dlp + single static binary) ----------
 FROM python:3.12-alpine
-RUN apk add --no-cache ffmpeg ca-certificates \
+# nodejs = yt-dlp JS runtime: modern YouTube clients need it for reliable
+# extraction (esp. logged-in/cookie sessions); without it some videos come
+# back with no usable formats ("Requested format is not available").
+RUN apk add --no-cache ffmpeg ca-certificates nodejs \
     && pip install --no-cache-dir yt-dlp
 
 COPY --from=api /src/target/release/kv-dl-server /usr/local/bin/kv-dl-server

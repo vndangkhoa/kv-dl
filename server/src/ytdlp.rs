@@ -19,9 +19,58 @@ impl ExtractError {
     }
 }
 
+/// Detect a JS runtime once at startup. yt-dlp needs one (node/deno) for
+/// modern YouTube extraction — logged-in/cookie sessions otherwise often
+/// return no usable formats ("Requested format is not available").
+static JS_ARGS: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+
+pub async fn init_js_runtime() {
+    let ok = tokio::process::Command::new("node")
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await
+        .map(|s| s.success())
+        .unwrap_or(false);
+    let _ = JS_ARGS.set(if ok { vec!["--js-runtimes", "node"] } else { Vec::new() });
+    eprintln!(
+        "[kv-dl] yt-dlp JS runtime: {}",
+        if ok { "node" } else { "none (extraction may be limited)" }
+    );
+}
+
+pub fn js_args() -> &'static [&'static str] {
+    JS_ARGS.get().map(|v| v.as_slice()).unwrap_or(&[])
+}
+
 /// Run `yt-dlp --dump-single-json` for one video. Cookies, when present, are
 /// piped through stdin as `--cookies /dev/stdin` so nothing touches the disk.
+/// One automatic retry absorbs transient YouTube extraction hiccups.
 pub async fn extract_json(url: &str, cookies_text: Option<&str>) -> Result<Value, ExtractError> {
+    match extract_json_once(url, cookies_text).await {
+        Err(e) if should_retry(&e.message) => {
+            let first_line = e.message.lines().next().unwrap_or("").to_string();
+            eprintln!("[kv-dl] yt-dlp: retrying extraction once ({first_line})");
+            extract_json_once(url, cookies_text).await
+        }
+        other => other,
+    }
+}
+
+fn should_retry(msg: &str) -> bool {
+    msg.contains("Requested format")
+        || msg.contains("Unable to download")
+        || msg.contains("unable to download")
+        || msg.contains("Precondition check failed")
+        || msg.contains("Sign in to confirm")
+}
+
+async fn extract_json_once(
+    url: &str,
+    cookies_text: Option<&str>,
+) -> Result<Value, ExtractError> {
     let mut cmd = tokio::process::Command::new("yt-dlp");
     cmd.args([
         "--dump-single-json",
@@ -32,6 +81,7 @@ pub async fn extract_json(url: &str, cookies_text: Option<&str>) -> Result<Value
         "--retries",
         "2",
     ]);
+    cmd.args(js_args());
     if cookies_text.is_some() {
         cmd.arg("--cookies").arg("/dev/stdin");
         cmd.stdin(Stdio::piped());

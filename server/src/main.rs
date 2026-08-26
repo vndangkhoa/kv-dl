@@ -759,6 +759,28 @@ async fn landing_id(uri: Uri, headers: HeaderMap, Path(id): Path<String>) -> Res
     redirect_to_landing(&format!("https://www.youtube.com/watch?v={id}"))
 }
 
+/// GET /api/tls-check?domain=… — Caddy on_demand_tls "ask" endpoint.
+/// Returns 200 only for hostnames under TLS_DOMAIN_SUFFIX (default
+/// "vndns.net"), so Caddy can safely issue certificates on the fly for any
+/// swapped subdomain (youtube., www.youtube., m., …).
+#[derive(Deserialize)]
+struct TlsCheckQuery {
+    domain: Option<String>,
+}
+
+async fn tls_check(Query(q): Query<TlsCheckQuery>) -> Response {
+    let suffix = std::env::var("TLS_DOMAIN_SUFFIX").unwrap_or_else(|_| "vndns.net".into());
+    let ok = q.domain.as_deref().is_some_and(|d| {
+        let d = d.trim().trim_end_matches('.').to_lowercase();
+        d == suffix || d.ends_with(&format!(".{suffix}"))
+    });
+    if ok {
+        StatusCode::OK.into_response()
+    } else {
+        StatusCode::FORBIDDEN.into_response()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
@@ -811,6 +833,7 @@ async fn main() {
         .route("/robots.txt", get(|| async {
             "User-agent: *\nDisallow: /api/\n"
         }))
+        .route("/api/tls-check", get(tls_check))
         .route("/api/info", post(api_info))
         .route("/api/playlist", post(api_playlist))
         .route("/api/download", get(api_download))

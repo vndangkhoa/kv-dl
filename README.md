@@ -131,6 +131,33 @@ Any domain works — the swap suffix derives from the serving host; links shaped
 like `https://youtube.<your-domain>/watch?v=…` work out of the box, both for
 pasting and for opening straight in the browser.
 
+#### Make *every* swapped subdomain work (on-demand TLS)
+
+Swapped hosts can be deep (`www.youtube.` = two extra levels), and DNS
+wildcards only cover one level. The scalable recipe:
+
+1. **DNS** — wildcard records pointing at your server:
+   `*.your-domain` and `*.youtube.your-domain` (A records).
+2. **Caddy** — issue certificates on the fly, with the app as approver:
+
+   ```caddy
+   {
+       on_demand_tls {
+           ask http://127.0.0.1:8080/api/tls-check
+       }
+   }
+
+   https:// {
+       tls {
+           on_demand
+       }
+       reverse_proxy 127.0.0.1:8080
+   }
+   ```
+
+3. Set `TLS_DOMAIN_SUFFIX` (default `vndns.net`) to your domain — `/api/tls-check`
+   answers `200` only for hostnames under it, so Caddy never certs strangers.
+
 ---
 
 ## ⚙️ Configuration

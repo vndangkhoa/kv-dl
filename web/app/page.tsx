@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { InfoResponse, Stats } from "@/lib/types";
 import Odometer from "@/components/Odometer";
 import DemoTypewriter from "@/components/DemoTypewriter";
@@ -9,15 +9,42 @@ import SelfHostModal from "@/components/SelfHostModal";
 
 type Mode = "video" | "audio";
 
+interface DlState {
+  label: string;
+  received: number;
+  total: number | null;
+}
+
+function mb(n: number) {
+  return n >= 1024 * 1024 * 1024
+    ? `${(n / 1024 ** 3).toFixed(2)} GB`
+    : `${(n / 1024 ** 2).toFixed(1)} MB`;
+}
+
+function durationSec(s: string) {
+  return s.split(":").reduce((a, b) => a * 60 + Number(b) || a, 0);
+}
+
 export default function Home() {
   const [url, setUrl] = useState("");
   const [loading, setLoading] = useState(false);
+  const [fetchStart, setFetchStart] = useState<number | null>(null);
+  const [fetchNow, setFetchNow] = useState<number>(0);
   const [error, setError] = useState("");
   const [info, setInfo] = useState<InfoResponse | null>(null);
   const [mode, setMode] = useState<Mode>("video");
   const [fid, setFid] = useState<string | null>(null);
   const [abr, setAbr] = useState("192");
   const [stats, setStats] = useState<Stats | null>(null);
+  const [dl, setDl] = useState<DlState | null>(null);
+  const dlCtrl = useRef<AbortController | null>(null);
+  const [streamToDisk, setStreamToDisk] = useState(false);
+
+  // File System Access API lets us stream the download straight to disk
+  // (Chrome/Edge); everywhere else we buffer to a Blob before saving.
+  useEffect(() => {
+    setStreamToDisk(typeof (window as unknown as { showSaveFilePicker?: unknown }).showSaveFilePicker === "function");
+  }, []);
 
   const pollStats = useCallback(async () => {
     try {
@@ -34,10 +61,19 @@ export default function Home() {
     return () => clearInterval(id);
   }, [pollStats]);
 
+  // ticking timer while /api/info is in flight
+  useEffect(() => {
+    if (fetchStart === null) return;
+    setFetchNow(0);
+    const id = setInterval(() => setFetchNow((Date.now() - fetchStart) / 1000), 100);
+    return () => clearInterval(id);
+  }, [fetchStart]);
+
   async function fetchInfo(e?: React.FormEvent) {
     e?.preventDefault();
     if (!url.trim()) return;
     setLoading(true);
+    setFetchStart(Date.now());
     setError("");
     setInfo(null);
     try {
@@ -62,26 +98,92 @@ export default function Home() {
       setError("Failed to fetch video info:\n" + (err as Error).message);
     } finally {
       setLoading(false);
+      setFetchStart(null);
     }
-  }
-
-  function download() {
-    if (!info) return;
-    const params = new URLSearchParams({ url, mode });
-    if (mode === "video") {
-      if (!fid) return;
-      params.set("fid", fid);
-    } else {
-      params.set("abr", abr);
-    }
-    const a = document.createElement("a");
-    a.href = "/api/download?" + params.toString();
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
   }
 
   const selectedOption = info?.video_options.find((o) => o.fid === fid);
+
+  function targetFilename() {
+    if (!info) return "download";
+    const safe = info.title.replace(/[\\/:*?"<>|]/g, "_").slice(0, 120);
+    return mode === "audio" ? `${safe} [${abr}kbps].mp3` : `${safe} [${selectedOption?.label ?? ""}].mp4`;
+  }
+
+  async function download() {
+    if (!info || dl) return;
+    const params = new URLSearchParams({ url, mode });
+    let estTotal: number | null = null;
+    const dur = durationSec(info.duration_string ?? "");
+    if (mode === "video") {
+      if (!fid) return;
+      params.set("fid", fid);
+      if (selectedOption?.size_mb) estTotal = selectedOption.size_mb * 1024 * 1024;
+    } else {
+      params.set("abr", abr);
+      if (dur) estTotal = Math.round(((Number(abr) * 1000) / 8) * dur * 1.1);
+    }
+
+    // Chrome/Edge: ask where to save first (user gesture), then stream
+    // straight to disk. Others: buffer to a Blob and hand it to the browser.
+    type Writable = { write: (c: Uint8Array) => Promise<void>; close: () => Promise<void>; abort: () => Promise<void> };
+    type FileHandle = { createWritable: () => Promise<Writable> };
+    const w = window as unknown as { showSaveFilePicker?: (o?: object) => Promise<FileHandle> };
+    let handle: FileHandle | null = null;
+    if (typeof w.showSaveFilePicker === "function") {
+      try {
+        handle = await w.showSaveFilePicker({ suggestedName: targetFilename() });
+      } catch {
+        return; // user closed the save dialog — nothing to do
+      }
+    }
+
+    const label = targetFilename();
+    const ctrl = new AbortController();
+    dlCtrl.current = ctrl;
+    setDl({ label, received: 0, total: estTotal });
+    setError("");
+
+    let writable: Writable | null = null;
+    try {
+      const res = await fetch("/api/download?" + params.toString(), { signal: ctrl.signal });
+      if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
+      if (handle) writable = await handle.createWritable();
+
+      const reader = res.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let received = 0;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        received += value.byteLength;
+        setDl((s) => (s ? { ...s, received } : s));
+        if (writable) await writable.write(value);
+        else chunks.push(value);
+      }
+
+      if (writable) {
+        await writable.close();
+      } else {
+        const blobUrl = URL.createObjectURL(new Blob(chunks as BlobPart[]));
+        const a = document.createElement("a");
+        a.href = blobUrl;
+        a.download = label;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(blobUrl), 30000);
+      }
+    } catch (err) {
+      if ((err as Error).name !== "AbortError") {
+        setError("Download failed:\n" + (err as Error).message);
+      }
+      if (writable) await writable.abort().catch(() => {});
+    } finally {
+      dlCtrl.current = null;
+      setDl(null);
+    }
+  }
 
   return (
     <main className="mx-auto max-w-xl px-4 pb-16 pt-12">
@@ -125,9 +227,16 @@ export default function Home() {
             disabled={loading}
             className="rounded-xl bg-gradient-to-br from-cyan-300 to-emerald-300 px-6 py-3 font-bold text-[15px] text-teal-950 transition hover:brightness-110 disabled:opacity-55"
           >
-            {loading ? "…" : "Fetch"}
+            {loading ? "Fetching…" : "Fetch"}
           </button>
         </form>
+        {loading && (
+          <div className="mt-2.5 flex items-center justify-center gap-2 text-xs text-slate-400">
+            <span className="live-dot h-1.5 w-1.5 rounded-full bg-cyan-300" />
+            <span>Reading video info from YouTube… {fetchNow.toFixed(1)}s</span>
+            {fetchNow > 6 && <span className="text-slate-500">(large pages / retries take longer)</span>}
+          </div>
+        )}
         {error && <p className="mt-3 whitespace-pre-wrap break-words text-sm text-rose-300">{error}</p>}
 
         {info && (
@@ -206,18 +315,57 @@ export default function Home() {
             <button
               type="button"
               onClick={download}
-              disabled={mode === "video" && !fid}
+              disabled={(mode === "video" && !fid) || dl !== null}
               className="mt-5 w-full rounded-xl bg-gradient-to-br from-emerald-300 to-cyan-300 py-3.5 font-bold text-[15px] text-teal-950 transition hover:brightness-110 disabled:opacity-45"
             >
-              {mode === "audio"
+              {dl ? "Downloading…" : mode === "audio"
                 ? `Download MP3 · ${abr} kbps`
                 : selectedOption
                   ? `Download MP4 · ${selectedOption.label}`
                   : "Select a quality"}
             </button>
-            <p className="mt-2 min-h-4 text-center text-xs text-slate-500">
-              Streams straight to your browser — nothing is saved on the server.
-            </p>
+
+            {dl && (
+              <div className="mt-3 rounded-xl border border-cyan-300/30 bg-cyan-300/[0.06] p-3.5">
+                <div className="flex items-center justify-between gap-2 text-xs">
+                  <span className="min-w-0 truncate font-medium text-slate-200">{dl.label}</span>
+                  <span className="shrink-0 tabular-nums text-slate-400">
+                    {mb(dl.received)}
+                    {dl.total != null && dl.total > 0 && (
+                      <> / ~{mb(dl.total)} · {Math.min(99, Math.floor((dl.received / dl.total) * 100))}%</>
+                    )}
+                  </span>
+                </div>
+                <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-black/40">
+                  {dl.total != null && dl.total > 0 ? (
+                    <div
+                      className="dl-bar h-full rounded-full bg-gradient-to-r from-cyan-300 to-emerald-300"
+                      style={{ width: `${Math.min(100, (dl.received / dl.total) * 100)}%` }}
+                    />
+                  ) : (
+                    <div className="dl-indeterminate h-full" />
+                  )}
+                </div>
+                <div className="mt-2 flex items-center justify-between">
+                  <span className="text-[11px] text-slate-500">
+                    {streamToDisk ? "Saving straight to disk" : "Buffering in browser memory — keep this tab open"}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => dlCtrl.current?.abort()}
+                    className="rounded-lg border border-white/10 bg-white/5 px-2.5 py-1 text-[11px] text-slate-300 transition-colors hover:border-rose-400 hover:text-rose-300"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {!dl && (
+              <p className="mt-2 min-h-4 text-center text-xs text-slate-500">
+                Streams straight to your browser — nothing is saved on the server.
+              </p>
+            )}
           </div>
         )}
 

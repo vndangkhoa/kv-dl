@@ -76,6 +76,14 @@ dialog::backdrop {
   backdrop-filter: blur(3px);
 }
 
+/* ---- self-host dialog ---- */
+@keyframes dlg-pop {
+  from { opacity: 0; transform: translateY(14px) scale(0.97); }
+}
+dialog.dlg-pop[open] { animation: dlg-pop 0.3s cubic-bezier(0.22, 1, 0.36, 1); }
+@keyframes backdrop-fade { from { opacity: 0; } }
+dialog[open]::backdrop { animation: backdrop-fade 0.2s ease; }
+
 @media (prefers-reduced-motion: reduce) {
-  .od-strip, .caret, .arrow-bounce, .live-dot, .stat-bump { animation: none !important; transition: none !important; }
+  .od-strip, .caret, .arrow-bounce, .live-dot, .stat-bump, dialog.dlg-pop[open], dialog[open]::backdrop { animation: none !important; transition: none !important; }
 }

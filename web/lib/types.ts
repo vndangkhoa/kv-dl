@@ -7,6 +7,7 @@ export interface VideoOption {
 
 export interface InfoResponse {
   normalized_url: string;
+  id?: string;
   title: string;
   uploader: string | null;
   duration_string: string;

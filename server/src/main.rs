@@ -208,6 +208,7 @@ async fn api_info(
 
     Json(json!({
         "normalized_url": url,
+        "id": video.get("id"),
         "title": video.get("title"),
         "uploader": video.get("uploader").or_else(|| video.get("channel")),
         "duration_string": ytdlp::duration_string(duration),

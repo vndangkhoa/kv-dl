@@ -38,6 +38,7 @@ export default function Home() {
   const [stats, setStats] = useState<Stats | null>(null);
   const [dl, setDl] = useState<DlState | null>(null);
   const dlCtrl = useRef<AbortController | null>(null);
+  const [preview, setPreview] = useState(false);
   const [streamToDisk, setStreamToDisk] = useState(false);
 
   // File System Access API lets us stream the download straight to disk
@@ -84,6 +85,7 @@ export default function Home() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+      setPreview(false);
       setInfo(data as InfoResponse);
       // default pick: closest to 1080p
       const opts = (data as InfoResponse).video_options;
@@ -241,28 +243,65 @@ export default function Home() {
 
         {info && (
           <div className="mt-5">
-            <div className="flex items-center gap-3.5">
-              {info.thumbnail && (
-                <div className="relative shrink-0">
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img
-                    src={info.thumbnail}
-                    alt=""
-                    referrerPolicy="no-referrer"
-                    className="aspect-video w-40 rounded-lg border border-white/10 bg-black object-cover"
-                  />
-                  {info.duration_string && (
-                    <span className="absolute bottom-1.5 right-1.5 rounded bg-black/75 px-1.5 py-0.5 text-[11px]">
-                      {info.duration_string}
-                    </span>
+            {info.id && preview ? (
+              <div className="overflow-hidden rounded-xl border border-white/10 bg-black">
+                <iframe
+                  className="aspect-video w-full"
+                  src={`https://www.youtube-nocookie.com/embed/${encodeURIComponent(info.id)}?autoplay=1&rel=0`}
+                  title={info.title}
+                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                  allowFullScreen
+                />
+                <button
+                  type="button"
+                  onClick={() => setPreview(false)}
+                  className="w-full border-t border-white/10 bg-white/[0.03] py-1.5 text-[11.5px] text-slate-400 transition-colors hover:bg-white/[0.07] hover:text-cyan-200"
+                >
+                  ▴ Hide preview
+                </button>
+              </div>
+            ) : (
+              <div className="flex items-center gap-3.5">
+                {info.thumbnail && (
+                  <button
+                    type="button"
+                    onClick={() => setPreview(true)}
+                    disabled={!info.id}
+                    title={info.id ? "Click to preview the video" : undefined}
+                    className="group relative shrink-0 overflow-hidden rounded-lg border border-white/10 focus:outline-none focus-visible:border-cyan-300 disabled:cursor-default"
+                  >
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={info.thumbnail}
+                      alt=""
+                      referrerPolicy="no-referrer"
+                      className="aspect-video w-40 bg-black object-cover"
+                    />
+                    {info.id && (
+                      <span className="absolute inset-0 grid place-items-center bg-black/30 opacity-0 transition-opacity group-hover:opacity-100">
+                        <span className="grid h-10 w-10 place-items-center rounded-full bg-cyan-300 text-teal-950 shadow-lg transition-transform group-hover:scale-110">
+                          ▶
+                        </span>
+                      </span>
+                    )}
+                    {info.duration_string && (
+                      <span className="absolute bottom-1.5 right-1.5 rounded bg-black/75 px-1.5 py-0.5 text-[11px]">
+                        {info.duration_string}
+                      </span>
+                    )}
+                  </button>
+                )}
+                <div className="min-w-0">
+                  <h2 className="line-clamp-3 text-[15px] leading-snug">{info.title}</h2>
+                  {info.uploader && <p className="mt-1 text-xs text-slate-400">{info.uploader}</p>}
+                  {info.id && (
+                    <p className="mt-1.5 text-[11px] text-slate-500 group-hover:hidden">
+                      Click the thumbnail to preview ▸
+                    </p>
                   )}
                 </div>
-              )}
-              <div className="min-w-0">
-                <h2 className="line-clamp-3 text-[15px] leading-snug">{info.title}</h2>
-                {info.uploader && <p className="mt-1 text-xs text-slate-400">{info.uploader}</p>}
               </div>
-            </div>
+            )}
 
             {/* mode switch */}
             <div className="mt-4 grid grid-cols-2 gap-1 rounded-xl border border-white/10 bg-black/30 p-1">

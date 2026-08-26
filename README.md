@@ -36,42 +36,32 @@ Nothing ever touches the server's disk.
 ## 🔁 Data flow
 
 ```mermaid
-sequenceDiagram
-    autonumber
-    participant B as 🖥️ Browser
-    participant A as ⚙️ Rust API (:8080)
-    participant Y as 🐍 yt-dlp
-    participant U as 📺 YouTube
-    participant F as 🎞️ ffmpeg
+flowchart LR
+    B["🖥️ Browser"]
+    V[("RAM-only cookie vault")]
+    A["⚙️ Rust API<br/>URL normalizer<br/>(any-domain swap,<br/>playlist params stripped)"]
+    U["📺 YouTube"]
+    Y["🐍 yt-dlp<br/>per-stream fetchers"]
+    P1(["FIFO #1<br/>video"])
+    P2(["FIFO #2<br/>audio"])
+    F["🎞️ ffmpeg<br/>mux · video copied<br/>nothing written to disk"]
+    S["💾 Save-to-disk<br/>live progress bar"]
 
-    rect rgb(20, 30, 45)
-    Note over B,U: ① Fetch — metadata
-    B->>A: POST /api/info {url}
-    A->>A: normalize URL<br/>(any-domain swap, strip playlist params)
-    A->>Y: --dump-single-json (+ cookies from RAM vault)
-    Y->>U: metadata & format queries
-    U-->>Y: title, duration, formats
-    Y-->>A: JSON
-    A-->>B: id · title · thumbnail · qualities (+size est.)
-    end
+    B -- "cookies: paste or file<br/>(Netscape · JSON · header · Set-Cookie)" --> V
+    V -.->|"HMAC session,<br/>RAM only"| A
 
-    rect rgb(18, 38, 32)
-    Note over B,F: ② Download — stream merge
-    B->>A: GET /api/download?url&mode&fid/abr
-    A->>Y: spawn per-stream fetchers
-    par video stream
-        Y->>U: ranged HTTP (full speed)
-        U-->>Y: video bytes
-        Y-->>A: FIFO #1
-    and audio stream
-        Y->>U: ranged HTTP (full speed)
-        U-->>Y: audio bytes
-        Y-->>A: FIFO #2
-    end
-    A->>F: read FIFOs, mux (-c:v copy)
-    F-->>B: fragmented MP4 / MP3, streamed chunks
-    Note over B: live progress bar →<br/>save-to-disk (File System Access API)
-    end
+    B ==>|"① POST /api/info"| A
+    A ==>|"② yt-dlp --dump-single-json"| U
+    U ==>|"③ id · title · thumbnail<br/>qualities + size estimates"| B
+
+    B ==>|"④ GET /api/download"| Y
+    U -->|"ranged HTTP,<br/>full speed"| Y
+    Y --> P1
+    Y --> P2
+    P1 --> F
+    P2 --> F
+    F ==>|"⑤ fragmented MP4 / MP3<br/>streamed HTTP chunks"| B
+    B --> S
 ```
 
 The same one-liner, minus the ceremony:

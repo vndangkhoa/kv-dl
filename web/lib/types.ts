@@ -19,6 +19,7 @@ export interface InfoResponse {
 export interface CookieStatus {
   active: boolean;
   name?: string;
+  format?: string;
   cookies?: number;
   server_default?: boolean;
 }

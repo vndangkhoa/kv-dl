@@ -9,7 +9,8 @@ mod download;
 mod normalize;
 mod ytdlp;
 
-use axum::extract::{DefaultBodyLimit, Multipart, Query, State};
+use axum::body::to_bytes;
+use axum::extract::{DefaultBodyLimit, FromRequest, Multipart, Query, Request, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -341,58 +342,108 @@ async fn api_cookies_status(State(state): State<SharedState>, headers: HeaderMap
     Json(cookies::status_json(entry.as_ref(), server_default)).into_response()
 }
 
+/// POST /api/cookies/upload
+/// Accepts either a multipart file upload (`file` field, any common format)
+/// or a raw pasted body (`application/json` with {"text": …} or plain text).
 async fn api_cookies_upload(
     State(state): State<SharedState>,
     headers: HeaderMap,
-    mut multipart: Multipart,
+    req: Request,
 ) -> Response {
-    let mut file_text: Option<(String, String)> = None; // (text, name)
-    while let Ok(Some(field)) = multipart.next_field().await {
-        if field.name() != Some("file") {
-            continue;
-        }
-        let name = field.file_name().unwrap_or("cookies.txt").to_string();
-        let data = match field.bytes().await {
-            Ok(d) => d,
-            Err(e) => return err_json(StatusCode::BAD_REQUEST, format!("Upload failed: {e}")),
+    let content_type =
+        headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("");
+
+    let (text, source_name) = if content_type.starts_with("multipart/form-data") {
+        let mut multipart = match Multipart::from_request(req, &()).await {
+            Ok(m) => m,
+            Err(e) => return err_json(StatusCode::BAD_REQUEST, e.body_text()),
         };
-        if data.len() > cookies::MAX_UPLOAD_BYTES {
-            return err_json(StatusCode::BAD_REQUEST, "File too large (max 512 KB).");
+        let mut found: Option<(String, String)> = None; // (text, name)
+        while let Ok(Some(field)) = multipart.next_field().await {
+            if field.name() != Some("file") {
+                continue;
+            }
+            let fname = field.file_name().unwrap_or("cookies.txt").to_string();
+            let data = match field.bytes().await {
+                Ok(d) => d,
+                Err(e) => return err_json(StatusCode::BAD_REQUEST, format!("Upload failed: {e}")),
+            };
+            if data.len() > cookies::MAX_UPLOAD_BYTES {
+                return err_json(StatusCode::BAD_REQUEST, "File too large (max 512 KB).");
+            }
+            let t = match std::str::from_utf8(&data) {
+                Ok(t) => t.to_string(),
+                Err(_) => {
+                    return err_json(
+                        StatusCode::BAD_REQUEST,
+                        "Not valid UTF-8 text (is this really a cookies file?).",
+                    )
+                }
+            };
+            found = Some((t, fname));
+            break;
         }
-        let text = match std::str::from_utf8(&data) {
-            Ok(t) => t.to_string(),
+        match found {
+            Some(x) => x,
+            None => return err_json(
+                StatusCode::BAD_REQUEST,
+                "No file received. Choose a cookies file or paste the cookie text instead.",
+            ),
+        }
+    } else {
+        // Pasted text: JSON wrapper {"text": …} or the raw body itself.
+        let body = match to_bytes(req.into_body(), cookies::MAX_UPLOAD_BYTES).await {
+            Ok(b) => b,
             Err(_) => {
                 return err_json(
                     StatusCode::BAD_REQUEST,
-                    "Not a valid cookies.txt (must be UTF-8 text).",
+                    "Body too large or unreadable (max 512 KB).",
                 )
             }
         };
-        file_text = Some((text, name));
-        break;
-    }
-
-    let Some((text, name)) = file_text else {
-        return err_json(StatusCode::BAD_REQUEST, "No file received. Choose a cookies.txt file.");
+        if body.is_empty() {
+            return err_json(StatusCode::BAD_REQUEST, "No cookies provided.");
+        }
+        let t = match std::str::from_utf8(&body) {
+            Ok(t) => t.trim().to_string(),
+            Err(_) => return err_json(StatusCode::BAD_REQUEST, "Pasted cookies must be text."),
+        };
+        // Unwrap a JSON envelope if one was sent.
+        let t = if (t.starts_with('{') || t.starts_with('[')) && content_type.contains("json") {
+            match serde_json::from_str::<Value>(&t) {
+                Ok(Value::Object(map)) if map.contains_key("text") => match map["text"].as_str() {
+                    Some(s) => s.to_string(),
+                    None => t,
+                },
+                _ => t,
+            }
+        } else {
+            t
+        };
+        (t, "pasted-cookies".to_string())
     };
-    let (total, yt_count) = cookies::parse_netscape(&text);
-    if total == 0 {
+
+    // Normalize whatever format arrived into Netscape for yt-dlp.
+    let norm = match cookies::normalize_any(&text) {
+        Ok(n) => n,
+        Err(e) => return err_json(StatusCode::BAD_REQUEST, e),
+    };
+    if norm.youtube == 0 {
         return err_json(
             StatusCode::BAD_REQUEST,
-            "No cookies recognized. Export in Netscape format (the standard 'cookies.txt').",
-        );
-    }
-    if yt_count == 0 {
-        return err_json(
-            StatusCode::BAD_REQUEST,
-            "No YouTube cookies found — export them while visiting youtube.com.",
+            "No YouTube cookies found — export/copy them while visiting youtube.com.",
         );
     }
 
     // Rotate identity + store in the RAM-only vault (keyed by payload).
     let (cookie_value, vault_key) = cookies::new_session(&state.secret);
     let old_sid = current_sid(&headers, &state);
-    let entry = cookies::new_entry(text, sanitize_filename(&name), total);
+    let entry = cookies::new_entry(
+        norm.text,
+        sanitize_filename(&source_name),
+        norm.format.to_string(),
+        norm.total,
+    );
     {
         let mut vault = state.vault.lock().unwrap();
         if let Some(old) = old_sid {
@@ -404,6 +455,7 @@ async fn api_cookies_upload(
     let resp_body = json!({
         "active": true,
         "name": entry.name,
+        "format": entry.format,
         "cookies": entry.count,
         "added_at": entry.added_unix,
     });

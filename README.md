@@ -22,7 +22,7 @@ browser: **nothing is ever written to the server's disk.**
 | Selectable quality | one entry per height up to 2160p, size estimates, h264-preferred for MP4 compat |
 | Audio only | MP3 at 128/192/320 kbps |
 | Streaming | ffmpeg pipes fragmented MP4 / MP3 directly into the HTTP response (with yt-dlp-piped fallback strategy) |
-| Cookies vault | per-user upload of `cookies.txt` — RAM only, signed HttpOnly session cookie, never on disk/logged/returned, TTL + manual erase |
+| Cookies vault | paste or upload cookies in any common format (Netscape `cookies.txt`, JSON export, `Cookie:` header string, `Set-Cookie` lines — auto-detected and normalized) — RAM only, signed HttpOnly session cookie, never on disk/logged/returned, TTL + manual erase |
 | Live stats | global download odometer + online-now counter (`/api/stats`, polled every 20 s), optional `STATS_FILE` persistence |
 | Self-host guide | built-in modal with DNS + Caddy/nginx snippets |
 
@@ -104,7 +104,7 @@ kept as a fallback for links already in circulation.
 |---|---|---|
 | `/api/info` | POST `{url}` | metadata + selectable formats |
 | `/api/download?url=&mode=video\|audio&fid=&abr=` | GET | streamed file |
-| `/api/cookies/upload` \| `/status` \| `/clear` | POST/GET | RAM-only vault |
+| `/api/cookies/upload` \| `/status` \| `/clear` | POST/GET | RAM-only vault. Upload: multipart `file` **or** pasted body (`{"text": …}` / raw text). Formats auto-detected |
 | `/api/stats` | GET | `{online, total_downloads}` |
 | `/api/health` | GET | liveness |
 

@@ -47,16 +47,27 @@ pub fn js_args() -> &'static [&'static str] {
 
 /// Run `yt-dlp --dump-single-json` for one video. Cookies, when present, are
 /// piped through stdin as `--cookies /dev/stdin` so nothing touches the disk.
-/// One automatic retry absorbs transient YouTube extraction hiccups.
+///
+/// Logged-in sessions sometimes negotiate clients whose format list can't be
+/// selected ("Requested format is not available"). On such failures we fall
+/// back progressively: default client override, then a cookie-less attempt.
 pub async fn extract_json(url: &str, cookies_text: Option<&str>) -> Result<Value, ExtractError> {
-    match extract_json_once(url, cookies_text).await {
-        Err(e) if should_retry(&e.message) => {
-            let first_line = e.message.lines().next().unwrap_or("").to_string();
-            eprintln!("[kv-dl] yt-dlp: retrying extraction once ({first_line})");
-            extract_json_once(url, cookies_text).await
+    let mut result = extract_json_once(url, cookies_text, &[]).await;
+    if let Err(e) = &result {
+        if should_retry(&e.message) && cookies_text.is_some() {
+            eprintln!("[kv-dl] yt-dlp: cookie'd extraction failed, retrying with default client");
+            result =
+                extract_json_once(url, cookies_text, &["--extractor-args", "youtube:player_client=default"]).await;
         }
-        other => other,
     }
+    if let Err(e) = &result {
+        if should_retry(&e.message) && cookies_text.is_some() {
+            eprintln!("[kv-dl] yt-dlp: still failing, retrying WITHOUT cookies");
+            result =
+                extract_json_once(url, None, &["--extractor-args", "youtube:player_client=default"]).await;
+        }
+    }
+    result
 }
 
 fn should_retry(msg: &str) -> bool {
@@ -70,6 +81,7 @@ fn should_retry(msg: &str) -> bool {
 async fn extract_json_once(
     url: &str,
     cookies_text: Option<&str>,
+    extra_args: &[&str],
 ) -> Result<Value, ExtractError> {
     let mut cmd = tokio::process::Command::new("yt-dlp");
     cmd.args([
@@ -82,6 +94,7 @@ async fn extract_json_once(
         "2",
     ]);
     cmd.args(js_args());
+    cmd.args(extra_args);
     if cookies_text.is_some() {
         cmd.arg("--cookies").arg("/dev/stdin");
         cmd.stdin(Stdio::piped());

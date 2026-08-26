@@ -63,16 +63,27 @@ fn prog_name(s: &Strategy) -> &str {
 }
 
 /// Try each strategy until one produces data, then stream its stdout to the
-/// client. The download counter fires exactly when streaming starts.
+/// client. The download counter fires exactly when streaming starts; `on_end`
+/// always fires when the streaming task exits (success, error or client gone).
 pub fn stream_response(
     strategies: Vec<Strategy>,
     mimetype: &'static str,
     content_disposition: String,
     on_start: impl FnOnce() + Send + 'static,
+    on_end: impl FnOnce() + Send + 'static,
 ) -> Response {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(8);
 
     tokio::spawn(async move {
+        struct Done<F: FnOnce()>(Option<F>);
+        impl<F: FnOnce()> Drop for Done<F> {
+            fn drop(&mut self) {
+                if let Some(f) = self.0.take() {
+                    f();
+                }
+            }
+        }
+        let _done = Done(Some(on_end));
         for (i, s) in strategies.iter().enumerate() {
             let running = start(s).await;
             let mut running = match running {

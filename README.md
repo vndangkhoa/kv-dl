@@ -143,6 +143,13 @@ pasting and for opening straight in the browser.
 | `SECURE_COOKIES` | off     | `1` adds the `Secure` flag (use behind HTTPS)      |
 | `STATS_FILE`     | –       | JSON file to persist the download counter          |
 | `COOKIES_FILE`   | –       | Server-wide fallback `cookies.txt` when a user has none |
+| `RATE_INFO_PER_MIN` | `10` | `/api/info` calls per IP per minute |
+| `RATE_PLAYLIST_PER_MIN` | `6` | `/api/playlist` calls per IP per minute |
+| `RATE_DOWNLOAD_PER_MIN` | `10` | `/api/download` starts per IP per minute |
+| `RATE_COOKIES_PER_MIN` | `6` | cookie uploads per IP per minute |
+| `DL_CONCURRENCY_PER_IP` | `2` | simultaneous downloads per IP |
+| `DL_CONCURRENCY_GLOBAL` | `8` | simultaneous downloads server-wide |
+| `VAULT_MAX_SESSIONS` | `1000` | max cookie sessions held in RAM (oldest evicted) |
 
 ## 🔌 API
 
@@ -157,6 +164,31 @@ pasting and for opening straight in the browser.
 
 Every request is line-logged to stdout (`[kv-dl] METHOD path → status (ms)`),
 so `docker logs` always tells you what happened.
+
+## 🛡️ Abuse protection
+
+Bots love public downloaders, so the API defends itself out of the box:
+
+| Guard | Default | What it does |
+|---|---|---|
+| Per-IP rate limits | info 10/min · playlist 6/min · download 10/min · cookies 6/min | fixed-window counters, `429 + Retry-After` when exceeded |
+| Download concurrency | 2 per IP, 8 global | extra download requests wait/`429` — protects CPU (yt-dlp/ffmpeg) and bandwidth |
+| Cookie vault cap | 1000 sessions | oldest session evicted when full — RAM can't be ballooned |
+| `robots.txt` | `Disallow: /api/` | keeps crawlers off the API |
+| Security headers | nosniff · DENY framing · referrer policy | applied to every response |
+| Body caps | 512 KB cookies · 2 MB requests | enforced server-side |
+
+All limits are env-tunable (`RATE_*`, `DL_*`, `VAULT_MAX_SESSIONS`) — see
+[Configuration](#configuration). Client identity prefers
+`X-Forwarded-For` (set it in your reverse proxy) and falls back to the peer
+address.
+
+**Recommended extra hardening for public deployments:**
+
+- Put **Cloudflare** (free) or a WireGuard/Tailscale tunnel in front — absorbs volumetric floods and hides your IP.
+- Caddy/nginx-level connection limits (`rate_limit` / `limit_req`) as a second layer.
+- Keep only 80/443 open (`ufw`); SSH via keys only; `fail2ban` for SSH.
+- For a private instance, don't expose it publicly at all — Tailscale + firewall allowlist is enough.
 
 ## 🧱 Project layout
 

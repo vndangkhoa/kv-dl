@@ -7,10 +7,11 @@
 mod cookies;
 mod download;
 mod normalize;
+mod rate;
 mod ytdlp;
 
 use axum::body::to_bytes;
-use axum::extract::{DefaultBodyLimit, FromRequest, Multipart, Path, Query, Request, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, FromRequest, Multipart, Path, Query, Request, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode, Uri};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Redirect, Response};
@@ -20,6 +21,7 @@ use percent_encoding::NON_ALPHANUMERIC;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -35,6 +37,14 @@ struct AppState {
     vault: Mutex<cookies::Vault>,
     seen: Mutex<HashMap<String, Instant>>,
     downloads: AtomicU64,
+    limiter: rate::RateLimiter,
+    rate_info: u32,
+    rate_playlist: u32,
+    rate_download: u32,
+    rate_cookies: u32,
+    dl_per_ip: u32,
+    dl_sem: std::sync::Arc<tokio::sync::Semaphore>,
+    vault_max: usize,
 }
 
 type SharedState = Arc<AppState>;
@@ -70,6 +80,49 @@ async fn log_requests(req: Request, next: Next) -> Response {
         start.elapsed().as_millis()
     );
     resp
+}
+
+/// Per-IP rate limits on the expensive endpoints + baseline security headers.
+async fn protect(
+    State(state): State<SharedState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    req: Request,
+    next: Next,
+) -> Response {
+    let path = req.uri().path().to_string();
+    let resp = next.run(req).await;
+
+    let client = rate::client_key(
+        headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()),
+        peer,
+    );
+    let (bucket, limit) = if path.starts_with("/api/info") {
+        ("info", state.rate_info)
+    } else if path.starts_with("/api/playlist") {
+        ("playlist", state.rate_playlist)
+    } else if path.starts_with("/api/download") {
+        ("download", state.rate_download)
+    } else if path.starts_with("/api/cookies/") {
+        ("cookies", state.rate_cookies)
+    } else {
+        ("", 0)
+    };
+    if !bucket.is_empty() && !state.limiter.check(&client, bucket, limit) {
+        println!("[kv-dl] rate-limit: {client} hit {bucket} cap");
+        let mut r = err_json(StatusCode::TOO_MANY_REQUESTS, "Too many requests — slow down.");
+        if let Ok(hv) = HeaderValue::from_str("60") {
+            r.headers_mut().insert(header::RETRY_AFTER, hv);
+        }
+        return r;
+    }
+
+    let (mut parts, body) = resp.into_parts();
+    let h = &mut parts.headers;
+    h.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
+    h.insert(header::REFERRER_POLICY, HeaderValue::from_static("strict-origin-when-cross-origin"));
+    h.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    Response::from_parts(parts, body)
 }
 
 fn random_secret() -> Vec<u8> {
@@ -342,6 +395,7 @@ fn default_mode() -> String {
 
 async fn api_download(
     State(state): State<SharedState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Query(q): Query<DownloadQuery>,
     headers: HeaderMap,
 ) -> Response {
@@ -349,6 +403,28 @@ async fn api_download(
         Ok(u) => u,
         Err(e) => return err_json(StatusCode::BAD_REQUEST, e),
     };
+
+    // Concurrency guards: per-client active downloads + global pipeline cap.
+    let client = rate::client_key(
+        headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()),
+        peer,
+    );
+    if !state.limiter.dl_start(&client, state.dl_per_ip) {
+        return err_json(
+            StatusCode::TOO_MANY_REQUESTS,
+            "You already have multiple downloads running — wait for them to finish.",
+        );
+    }
+    let permit = state.dl_sem.clone().acquire_owned().await;
+    let permit = match permit {
+        Ok(p) => p,
+        Err(_) => {
+            state.limiter.dl_end(&client);
+            return err_json(StatusCode::SERVICE_UNAVAILABLE, "Server is busy — try again shortly.");
+        }
+    };
+    let limiter_arc = Arc::clone(&state);
+    let client_for_end = client;
 
     let (cookie_text, cookie_hdr) = current_sid(&headers, &state)
         .and_then(|sid| state.vault.lock().unwrap().get(&sid))
@@ -421,6 +497,10 @@ async fn api_download(
         mimetype,
         cd,
         move || bump_downloads(&st2),
+        move || {
+            limiter_arc.limiter.dl_end(&client_for_end);
+            drop(permit);
+        },
     ))
     .into_response()
 }
@@ -567,6 +647,7 @@ async fn api_cookies_upload(
     }
 
     // Rotate identity + store in the RAM-only vault (keyed by payload).
+    // Evict the oldest entry when the vault hits its cap — bots can't balloon RAM.
     let (cookie_value, vault_key) = cookies::new_session(&state.secret);
     let old_sid = current_sid(&headers, &state);
     let entry = cookies::new_entry(
@@ -577,6 +658,16 @@ async fn api_cookies_upload(
     );
     {
         let mut vault = state.vault.lock().unwrap();
+        if vault.map.len() >= state.vault_max {
+            if let Some(oldest) = vault
+                .map
+                .iter()
+                .min_by_key(|(_, e)| e.last_used)
+                .map(|(k, _)| k.clone())
+            {
+                vault.remove(&oldest);
+            }
+        }
         if let Some(old) = old_sid {
             vault.remove(&old);
         }
@@ -692,16 +783,34 @@ async fn main() {
         }
     }
 
+    let env_u32 = |k: &str, d: u32| -> u32 {
+        std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d)
+    };
+
     let state = Arc::new(AppState {
         secret,
         secure_cookies: std::env::var("SECURE_COOKIES").as_deref() == Ok("1"),
         public_dir: std::env::var("PUBLIC_DIR").unwrap_or_else(|_| "public".to_string()),
         vault: Mutex::new(cookies::Vault::new()),
-        seen: Mutex::new(HashMap::new()),        downloads: AtomicU64::new(initial_downloads),
+        seen: Mutex::new(HashMap::new()),
+        downloads: AtomicU64::new(initial_downloads),
+        limiter: rate::RateLimiter::new(),
+        rate_info: env_u32("RATE_INFO_PER_MIN", 10),
+        rate_playlist: env_u32("RATE_PLAYLIST_PER_MIN", 6),
+        rate_download: env_u32("RATE_DOWNLOAD_PER_MIN", 10),
+        rate_cookies: env_u32("RATE_COOKIES_PER_MIN", 6),
+        dl_per_ip: env_u32("DL_CONCURRENCY_PER_IP", 2),
+        dl_sem: std::sync::Arc::new(tokio::sync::Semaphore::new(
+            env_u32("DL_CONCURRENCY_GLOBAL", 8) as usize,
+        )),
+        vault_max: env_u32("VAULT_MAX_SESSIONS", 1000) as usize,
     });
 
     let app = Router::new()
         .route("/api/health", get(health))
+        .route("/robots.txt", get(|| async {
+            "User-agent: *\nDisallow: /api/\n"
+        }))
         .route("/api/info", post(api_info))
         .route("/api/playlist", post(api_playlist))
         .route("/api/download", get(api_download))
@@ -716,6 +825,7 @@ async fn main() {
         .route("/v/{id}", get(landing_id))
         .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
         .fallback_service(ServeDir::new(&state.public_dir).append_index_html_on_directories(true))
+        .layer(middleware::from_fn_with_state(state.clone(), protect))
         .layer(middleware::from_fn(log_requests))
         .with_state(state);
 
@@ -725,5 +835,10 @@ async fn main() {
         .await
         .expect("failed to bind port");
     println!("KV-DL API (rust) listening on http://0.0.0.0:{port}");
-    axum::serve(listener, app).await.expect("server error");
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .expect("server error");
 }
